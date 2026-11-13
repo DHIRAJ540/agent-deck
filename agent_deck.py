@@ -1860,6 +1860,36 @@ def extract_agy_pending_action(summary_row, t_entry):
     return None
 
 
+def _trim_code_block(raw_text, max_lines=14, max_line_len=140):
+    if not raw_text:
+        return []
+    cleaned_lines = []
+    for ln in str(raw_text).replace("\r\n", "\n").replace("\r", "\n").splitlines():
+        s = strip_ansi(ln).rstrip()
+        if not s.strip() and (not cleaned_lines or not cleaned_lines[-1]):
+            continue
+        if len(s) > max_line_len:
+            s = s[: max_line_len - 1] + "…"
+        cleaned_lines.append(s)
+    while cleaned_lines and not cleaned_lines[-1]:
+        cleaned_lines.pop()
+    if len(cleaned_lines) > max_lines:
+        omitted = len(cleaned_lines) - max_lines
+        cleaned_lines = cleaned_lines[:max_lines] + [f"… ({omitted} more lines)"]
+    return cleaned_lines
+
+
+def _extract_generic_cmd_output(raw_content):
+    if not raw_content or "Command output:" not in raw_content:
+        return []
+    _, _, after = raw_content.partition("Command output:\n")
+    if not after.strip():
+        return []
+    # Strip trailing system-message wrappers if present
+    after = after.split("\n\nThe following is a <SYSTEM_MESSAGE>", 1)[0]
+    return _trim_code_block(after, max_lines=14, max_line_len=140)
+
+
 def _render_agy_transcript(conv_id, steps, cwd, header_prefix="Antigravity Live Session", title="", pending_action=None):
     title_str = f" — {title}" if title else ""
     lines = [
@@ -1867,16 +1897,19 @@ def _render_agy_transcript(conv_id, steps, cwd, header_prefix="Antigravity Live 
         f"\x1b[2mWorkspace: {cwd}\x1b[0m",
         "\x1b[2m" + ("─" * 68) + "\x1b[0m",
     ]
-    for st in steps[-24:]:
+    last_had_run_cmd = False
+    for st in steps[-28:]:
         stype = st.get("type", "")
         content = st.get("content") or ""
         if stype == "USER_INPUT":
+            last_had_run_cmd = False
             m = USER_REQ_RE.search(content)
             user_txt = (m.group(1) if m else content).strip()
             if user_txt:
-                short_u = user_txt if len(user_txt) <= 600 else user_txt[:600] + " …"
+                short_u = user_txt if len(user_txt) <= 700 else user_txt[:700] + " …"
                 lines.append(f"\n\x1b[1;32m❯ User\x1b[0m\n{short_u}")
         elif stype == "PLANNER_RESPONSE":
+            last_had_run_cmd = False
             thinking = (st.get("thinking") or "").strip()
             if thinking:
                 hm = re.findall(r"\*\*([^*]{4,80})\*\*", thinking)
@@ -1885,13 +1918,35 @@ def _render_agy_transcript(conv_id, steps, cwd, header_prefix="Antigravity Live 
             for tc in st.get("tool_calls") or []:
                 tname = tc.get("name", "tool")
                 targs = tc.get("args") or {}
-                summary = (
-                    str(targs.get("toolSummary") or targs.get("Path") or targs.get("CommandLine") or "")
-                    .strip('"')[:90]
-                )
-                lines.append(f"\x1b[33m  ⚙ {tname}\x1b[0m \x1b[2m{summary}\x1b[0m")
+                if tname == "run_command":
+                    last_had_run_cmd = True
+                    cmd_str = str(_parse_transcript_arg(targs.get("CommandLine")) or "").strip()
+                    tsum = str(_parse_transcript_arg(targs.get("toolSummary")) or "").strip()
+                    if tsum:
+                        lines.append(f"\x1b[33m  ⚙ {tsum}\x1b[0m")
+                    if cmd_str:
+                        lines.append(f"\x1b[1;32m  $ {cmd_str[:160]}\x1b[0m")
+                elif tname in ("edit_file", "write_file"):
+                    fpath = str(_parse_transcript_arg(targs.get("Path")) or "").strip()
+                    short_f = os.path.basename(fpath) if fpath else fpath
+                    lines.append(f"\x1b[36m  ✎ {tname}\x1b[0m \x1b[1m{short_f}\x1b[0m \x1b[2m{fpath}\x1b[0m")
+                    snippet_raw = _parse_transcript_arg(targs.get("Replacement") or targs.get("Content") or "")
+                    for sln in _trim_code_block(snippet_raw, max_lines=8, max_line_len=130):
+                        lines.append(f"\x1b[2m    │ {sln}\x1b[0m")
+                else:
+                    summary = (
+                        str(_parse_transcript_arg(targs.get("toolSummary") or targs.get("Path") or targs.get("CommandLine")) or "")
+                        .strip()[:100]
+                    )
+                    lines.append(f"\x1b[33m  ⚙ {tname}\x1b[0m \x1b[2m{summary}\x1b[0m")
             if content.strip():
                 lines.append(f"\n\x1b[1;34m◆ Antigravity\x1b[0m\n{content.strip()}")
+        elif stype == "GENERIC" and last_had_run_cmd:
+            out_lines = _extract_generic_cmd_output(content)
+            for oln in out_lines:
+                lines.append(f"\x1b[2m    {oln}\x1b[0m")
+            if out_lines:
+                last_had_run_cmd = False
     if pending_action:
         lines.append("\n\x1b[1;33m● Action Needed — " + pending_action["title"] + "\x1b[0m")
         if pending_action.get("detail"):
@@ -2077,6 +2132,7 @@ def _read_claude_transcript(jpath):
                     first_user_title = first_ln[:64]
 
     pending_tools = []
+    tool_id_names = {}
     turns = []
     latest_task = ""
     last_conv_role = ""
@@ -2111,7 +2167,24 @@ def _read_claude_transcript(jpath):
                 if answered:
                     pending_tools = [t for t in pending_tools if t.get("id") not in answered]
                 for blk in content:
-                    if isinstance(blk, dict) and blk.get("type") == "text":
+                    if not isinstance(blk, dict):
+                        continue
+                    if blk.get("type") == "tool_result":
+                        tuid = blk.get("tool_use_id")
+                        src_tool = tool_id_names.get(tuid, "")
+                        is_err = bool(blk.get("is_error"))
+                        if src_tool == "Bash" or is_err:
+                            rc = blk.get("content")
+                            if isinstance(rc, list):
+                                rc = "\n".join(
+                                    str(x.get("text") or "")
+                                    for x in rc
+                                    if isinstance(x, dict) and x.get("type") == "text"
+                                )
+                            out_preview = _trim_code_block(rc, max_lines=12, max_line_len=140)
+                            if out_preview:
+                                turns.append(("output", out_preview, is_err))
+                    elif blk.get("type") == "text":
                         utxt = _clean_claude_user_text(blk.get("text") or "")
                         if utxt:
                             pending_tools.clear()
@@ -2130,8 +2203,11 @@ def _read_claude_transcript(jpath):
                 btype = blk.get("type")
                 if btype == "tool_use":
                     tname = str(blk.get("name") or "tool")
+                    tid = blk.get("id")
+                    if tid:
+                        tool_id_names[tid] = tname
                     tinp = blk.get("input") if isinstance(blk.get("input"), dict) else {}
-                    pending_tools.append({"id": blk.get("id"), "name": tname, "input": tinp})
+                    pending_tools.append({"id": tid, "name": tname, "input": tinp})
                     tsum = str(
                         tinp.get("description")
                         or tinp.get("command")
@@ -2142,7 +2218,15 @@ def _read_claude_transcript(jpath):
                     if tsum:
                         short_s = os.path.basename(tsum) if tsum.startswith("/") and " " not in tsum else _shorten_cmd(tsum, 72)
                         latest_task = f"{tname}: {short_s}"[:88]
-                    turns.append(("tool", tname, tsum[:90]))
+                    cmd_str = str(tinp.get("command") or "").strip() if tname == "Bash" else ""
+                    code_snip = []
+                    if tname in ("Edit", "Write"):
+                        code_snip = _trim_code_block(
+                            tinp.get("new_string") or tinp.get("content") or "",
+                            max_lines=8,
+                            max_line_len=130,
+                        )
+                    turns.append(("tool", tname, tsum[:110], cmd_str[:160], code_snip))
                 elif btype == "text":
                     atxt = str(blk.get("text") or "").strip()
                     if atxt:
@@ -2246,14 +2330,33 @@ def _render_claude_transcript(conv_id, c_entry, cwd, header_prefix="Claude Code 
         f"\x1b[2mWorkspace: {cwd}\x1b[0m",
         "\x1b[2m" + ("─" * 68) + "\x1b[0m",
     ]
-    for item in (c_entry.get("turns") or [])[-22:]:
+    for item in (c_entry.get("turns") or [])[-26:]:
         kind = item[0]
         if kind == "user":
             utxt = item[1]
-            short_u = utxt if len(utxt) <= 600 else utxt[:600] + " …"
+            short_u = utxt if len(utxt) <= 700 else utxt[:700] + " …"
             lines.append(f"\n\x1b[1;32m❯ User\x1b[0m\n{short_u}")
         elif kind == "tool":
-            lines.append(f"\x1b[33m  ⚙ {item[1]}\x1b[0m \x1b[2m{item[2]}\x1b[0m")
+            tname = item[1]
+            tsum = item[2]
+            cmd_str = item[3] if len(item) > 3 else ""
+            code_snip = item[4] if len(item) > 4 else []
+            if tname == "Bash" and cmd_str:
+                if tsum and tsum != cmd_str:
+                    lines.append(f"\x1b[33m  ⚙ {tsum}\x1b[0m")
+                lines.append(f"\x1b[1;32m  $ {cmd_str}\x1b[0m")
+            elif tname in ("Edit", "MultiEdit", "Write"):
+                short_f = os.path.basename(tsum) if tsum.startswith("/") else tsum
+                lines.append(f"\x1b[36m  ✎ {tname}\x1b[0m \x1b[1m{short_f}\x1b[0m \x1b[2m{tsum}\x1b[0m")
+                for sln in code_snip:
+                    lines.append(f"\x1b[2m    │ {sln}\x1b[0m")
+            else:
+                lines.append(f"\x1b[33m  ⚙ {tname}\x1b[0m \x1b[2m{tsum}\x1b[0m")
+        elif kind == "output":
+            out_lines, is_err = item[1], item[2]
+            clr = "\x1b[31m" if is_err else "\x1b[2m"
+            for oln in out_lines:
+                lines.append(f"{clr}    {oln}\x1b[0m")
         elif kind == "assistant":
             lines.append(f"\n\x1b[1;35m◆ Claude\x1b[0m\n{item[1]}")
     if pending_action:

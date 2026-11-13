@@ -10,7 +10,8 @@ One live dashboard and side-by-side local browser workspace for all your **Antig
 - **Direct Terminal Reply & 1-Click Option Selection:**
   - **Reply directly from the UI:** Send prompts, follow-ups, agent-aware slash commands (`agy` & `claude`), or keystrokes (`Enter`, `Esc`, `Ctrl+C`) straight to **Ghostty** (via Ghostty's native AppleScript suite, without stealing window focus), **iTerm2**, **Terminal.app**, and **`tmux`** — either from the inline `Reply` composer on any card or from the persistent reply dock beneath the Live Browser.
   - **1-click action & question choices:** Automatically detects pending `agy` (`ask_question` & unsandboxed command gates) and `claude` (`AskUserQuestion` & `Bash`/`Edit`/`Write` permission prompts) plus interactive TUI menus (`y/n`, numbered choices), rendering clickable option buttons directly on the session card and top of the Browser workspace.
-- **Side-by-Side Live Local Browser (Right Panel):**
+- **Instant `Browser` · `Terminal` · `Split` Workspace (Right Panel):**
+  - Switch right at the top of the workspace between **Browser** (live `localhost:<port>` preview), **Terminal** (live terminal text, `$` shell commands, command stdout/stderr, and edited file code snippets), or **Split** (live Browser on top + resizable live Terminal text panel right underneath) — or click **Code** / `:port` directly on any card.
   - Automatically detects listening dev server ports (`:3000`–`:9999` — Vite, Next.js, Astro, Uvicorn, etc.) inside each session's process tree (`lsof`) and maps each card to `http://localhost:<port>`.
   - Keeps a **stateful per-session `<iframe>` pool** so switching cards on the left switches browser views instantaneously without losing SPA route, open modals, or form state.
   - Serves on `http://localhost:7878` (dual-stack `127.0.0.1` + `::1`) so embedded `http://localhost:<port>` apps stay same-site and share `IndexedDB` (e.g. Firebase Auth), `localStorage`, and cookies.
@@ -66,8 +67,9 @@ Helper flags:
 | `j` / `k` or `↑` / `↓` | Switch session card |
 | `1` – `9` | Jump to session 1–9 |
 | `r` | Reload active session's browser view |
-| `b` | Toggle right panel between **Browser** and **Logs** |
-| `i` | Focus direct terminal reply input (in Browser or Logs view) |
-| `/` | Focus URL bar (in Browser view) or terminal output search (in Logs view) |
+| `b` | Toggle right panel between **Browser** and **Terminal** |
+| `t` | Toggle **Split** view (Browser + Terminal side-by-side vertically) |
+| `i` | Focus direct terminal reply input (in Browser, Terminal, or Split view) |
+| `/` | Focus URL bar (in Browser view) or terminal output search (in Terminal view) |
 | `v` | Toggle Focus Workspace / Multi-Session Grid Wall |
 | `n` | Start a new `tmux` session |

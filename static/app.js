@@ -26,6 +26,7 @@
     folder: `<svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>`,
     extOpen: `<svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>`,
     reply: `<svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><polyline points="9 10 4 15 9 20"/><path d="M20 4v7a4 4 0 0 1-4 4H4"/></svg>`,
+    terminal: `<svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>`,
   };
 
   let S = { seq: 0, sessions: [], events: [], recent_cwds: [], local_ports: [], now: Date.now() / 1000, home: "" };
@@ -33,7 +34,8 @@
   let loaded = false;
   let stick = true;
   let viewMode = pref("viewMode", "focus"); // "focus" | "grid"
-  let rightTab = pref("rightTab", "browser"); // "browser" | "terminal"
+  let rightTab = pref("rightTab", "browser"); // "browser" | "terminal" | "split"
+  if (!["browser", "terminal", "split"].includes(rightTab)) rightTab = "browser";
   let mobilePreview = pref("mobilePreview", false);
   let agentFilter = pref("agentFilter", "both"); // "both" | "agy" | "claude"
   if (!["both", "agy", "claude"].includes(agentFilter)) agentFilter = "both";
@@ -135,6 +137,56 @@
     });
 
     window.addEventListener("resize", () => applySidebarWidth(sidebarWidth, false));
+  })();
+
+  const DEFAULT_SPLIT_PCT = 54;
+  let splitTopPct = Number(pref("splitTopPct", DEFAULT_SPLIT_PCT)) || DEFAULT_SPLIT_PCT;
+  function applySplitPct(pct, persist = false) {
+    splitTopPct = Math.round(Math.min(78, Math.max(22, pct)));
+    $("#pane")?.style.setProperty("--split-top", `${splitTopPct}%`);
+    if (persist) setPref("splitTopPct", splitTopPct);
+  }
+  applySplitPct(splitTopPct, false);
+
+  (() => {
+    const sResizer = $("#splitResizer");
+    if (!sResizer) return;
+    let dragging = false;
+
+    sResizer.addEventListener("pointerdown", e => {
+      if (e.button !== 0) return;
+      dragging = true;
+      sResizer.classList.add("dragging");
+      document.body.classList.add("is-resizing");
+      sResizer.setPointerCapture(e.pointerId);
+      e.preventDefault();
+    });
+
+    sResizer.addEventListener("pointermove", e => {
+      if (!dragging) return;
+      const paneEl = $("#pane");
+      const barH = $("#workspaceModeBar")?.offsetHeight || 0;
+      const rect = paneEl.getBoundingClientRect();
+      const avail = Math.max(240, rect.height - barH);
+      const relY = e.clientY - rect.top - barH;
+      applySplitPct((relY / avail) * 100, false);
+    });
+
+    const stopSplitDrag = e => {
+      if (!dragging) return;
+      dragging = false;
+      sResizer.classList.remove("dragging");
+      document.body.classList.remove("is-resizing");
+      try { sResizer.releasePointerCapture(e.pointerId); } catch {}
+      setPref("splitTopPct", splitTopPct);
+    };
+    sResizer.addEventListener("pointerup", stopSplitDrag);
+    sResizer.addEventListener("pointercancel", stopSplitDrag);
+
+    sResizer.addEventListener("dblclick", () => {
+      applySplitPct(DEFAULT_SPLIT_PCT, true);
+      toast("Split height reset");
+    });
   })();
 
   $("#showExternal").checked = pref("external", true);
@@ -644,7 +696,7 @@
         const hostBadge = `<span class="row-badge ext-badge" title="Terminal location">${esc(hostLabel)}</span>`;
         const webLabel = s.dev_server || shortBrowserBadge(s.custom_url);
         const devBadge = webLabel
-          ? `<span class="row-badge dev-badge" title="${esc(s.browser_url || "Dev server running in this session")}">${esc(webLabel)}</span>`
+          ? `<button type="button" class="row-badge dev-badge" data-card-view="browser" data-card-id="${esc(s.id)}" title="Show live browser (${esc(s.browser_url || webLabel)})">${esc(webLabel)}</button>`
           : "";
         const termTitle = s.terminal_name || s.session;
         const taskText = s.current_task || s.label || "Idle";
@@ -660,6 +712,8 @@
         const replyToggleBtn = canSend
           ? `<button type="button" class="card-open-btn card-reply-toggle${replyOpen ? " active" : ""}" data-toggle-reply="${esc(s.id)}" title="Reply directly to ${esc(termTitle)}">${ICONS.reply}Reply</button>`
           : "";
+        const isTermShown = s.id === sel && (rightTab === "terminal" || rightTab === "split");
+        const termViewBtn = `<button type="button" class="card-open-btn${isTermShown ? " is-active-mode" : ""}" data-card-view="terminal" data-card-id="${esc(s.id)}" title="${isTermShown ? "Switch back to Browser view" : "Show terminal text & code right here"}">${ICONS.terminal}Code</button>`;
 
         let actionBoxHtml = "";
         if (s.status === "needs_input") {
@@ -691,8 +745,9 @@
             <span class="dot${pulse}"></span>
             <span class="row-name" title="${esc(termTitle)}">${s.pinned ? "★ " : ""}${esc(termTitle)}</span>
             <div class="card-top-actions">
+              ${termViewBtn}
               ${replyToggleBtn}
-              <button type="button" class="card-open-btn" data-open-term="${esc(s.id)}" title="Open in ${esc(s.host_app || "macOS Terminal")}">${ICONS.extOpen}Open</button>
+              <button type="button" class="card-open-btn" data-open-term="${esc(s.id)}" title="Focus window in ${esc(s.host_app || "macOS Terminal")}">${ICONS.extOpen}App</button>
             </div>
           </div>
           <div class="card-branch-row">
@@ -886,6 +941,32 @@
       bBranch.title = `${shortPath(s.cwd)} (${s.git.branch})`;
     }
 
+    const wAgentBadge = $("#wAgentBadge");
+    const wSummary = formatAgentSummary(s);
+    if (wAgentBadge) {
+      wAgentBadge.hidden = !wSummary;
+      if (wSummary) {
+        const wKindCls = s.agent_kind === "agy" ? "is-agy" : s.agent_kind === "claude" ? "is-claude" : "";
+        wAgentBadge.className = `agent-chip ${wKindCls}`.trim();
+        wAgentBadge.textContent = wSummary;
+      }
+    }
+
+    const wPortBadge = $("#wPortBadge");
+    if (wPortBadge) {
+      const portLbl = s.dev_port ? `:${s.dev_port}` : (s.custom_url ? shortBrowserBadge(s.custom_url).replace(/^web\s+/, "") : "");
+      wPortBadge.hidden = !portLbl;
+      if (portLbl) wPortBadge.textContent = portLbl;
+    }
+
+    const wOpenLbl = $("#wOpenAppLabel");
+    if (wOpenLbl) {
+      const appName = s.host_app && s.host_app !== "tmux" && s.host_app !== "Antigravity"
+        ? s.host_app
+        : "Terminal App";
+      wOpenLbl.textContent = `Open ${appName}`;
+    }
+
     const urlInput = $("#bUrlInput");
     if (document.activeElement !== urlInput) {
       urlInput.value = s.browser_url || "";
@@ -1042,10 +1123,17 @@
     }
 
     $$("[data-right-tab]").forEach(btn => {
-      btn.classList.toggle("active", btn.dataset.rightTab === rightTab);
+      const isAct = btn.dataset.rightTab === rightTab;
+      btn.classList.toggle("active", isAct);
+      if (btn.getAttribute("role") === "tab") {
+        btn.setAttribute("aria-selected", isAct ? "true" : "false");
+      }
     });
-    $("#browserView").hidden = rightTab !== "browser";
-    $("#termView").hidden = rightTab !== "terminal";
+    const isSplit = rightTab === "split";
+    $("#pane").classList.toggle("is-split", isSplit);
+    $("#browserView").hidden = rightTab === "terminal";
+    $("#splitResizer").hidden = !isSplit;
+    $("#termView").hidden = rightTab === "browser";
 
     renderBrowserView(s);
 
@@ -1265,7 +1353,7 @@
     renderEvents();
     if (viewMode === "focus") {
       renderInspector();
-      if (rightTab === "terminal") renderTerminalContent();
+      if (rightTab === "terminal" || rightTab === "split") renderTerminalContent();
     } else {
       renderGrid(list);
     }
@@ -1288,7 +1376,7 @@
 
   async function syncNeededOutputs() {
     if (viewMode === "focus") {
-      if (rightTab !== "terminal") return;
+      if (rightTab !== "terminal" && rightTab !== "split") return;
       const s = current();
       if (!s) return;
       const cached = paneOutputs[s.id];
@@ -1449,6 +1537,23 @@
   }
 
   $("#list").addEventListener("click", e => {
+    const viewBtn = e.target.closest("[data-card-view]");
+    if (viewBtn) {
+      e.stopPropagation();
+      const sid = viewBtn.dataset.cardId;
+      const desired = viewBtn.dataset.cardView;
+      if (desired === "terminal") {
+        const nextMode = (sid === sel && (rightTab === "terminal" || rightTab === "split")) ? "browser" : "terminal";
+        rightTab = nextMode;
+        setPref("rightTab", rightTab);
+        selectSession(sid);
+      } else {
+        rightTab = "browser";
+        setPref("rightTab", rightTab);
+        selectSession(sid);
+      }
+      return;
+    }
     const openBtn = e.target.closest("button[data-open-term]");
     if (openBtn) {
       e.stopPropagation();
@@ -1723,9 +1828,9 @@
   $("#bEmptyTermBtn").onclick = () => openInTerminal(sel);
   $("#bReplyOpenBtn").onclick = () => openInTerminal(sel);
 
-  // Right panel mode switch (Browser | Logs)
+  // Right panel mode switch (Browser | Terminal | Split)
   function setRightTab(tab) {
-    rightTab = tab === "terminal" ? "terminal" : "browser";
+    rightTab = ["browser", "terminal", "split"].includes(tab) ? tab : "browser";
     setPref("rightTab", rightTab);
     render();
     syncNeededOutputs();
@@ -2091,10 +2196,15 @@
     } else if (e.key === "b") {
       if (viewMode === "focus" && current()) {
         e.preventDefault();
-        setRightTab(rightTab === "browser" ? "terminal" : "browser");
+        setRightTab(rightTab === "terminal" ? "browser" : "terminal");
+      }
+    } else if (e.key === "t") {
+      if (viewMode === "focus" && current()) {
+        e.preventDefault();
+        setRightTab(rightTab === "split" ? "browser" : "split");
       }
     } else if (e.key === "r") {
-      if (viewMode === "focus" && rightTab === "browser" && sel && current()?.browser_url) {
+      if (viewMode === "focus" && rightTab !== "terminal" && sel && current()?.browser_url) {
         e.preventDefault();
         reloadBrowserFrame(sel);
         toast("Reloaded browser view");

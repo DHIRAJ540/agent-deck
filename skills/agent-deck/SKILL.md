@@ -22,7 +22,8 @@ Agent Deck gives developers a single live browser workspace (`http://localhost:7
 - **Direct Terminal Reply & 1-Click Option Selection:**
   - Sends prompts and keystrokes (`Enter`, `Esc`, `Ctrl+C`, `1`–`9`, `agy` & `claude` slash commands) directly to **Ghostty** (native Ghostty AppleScript `input text` + `send key`, without stealing window focus), **iTerm2**, **Terminal.app**, and **`tmux`** — right from the session card or the reply dock beneath the Live Browser.
   - Extracts pending `agy` (`ask_question` & command approvals) and `claude` (`AskUserQuestion` & `Bash`/`Edit`/`Write` permission prompts) plus TUI menus so users can click any option directly from Agent Deck.
-- **Side-by-Side Live Browser Workspace (Right Panel):**
+- **Instant `Browser` · `Terminal` · `Split` Workspace (Right Panel):**
+  - Switch at the top of the right workspace between **Browser** (live `localhost:<port>` preview), **Terminal** (live terminal screen buffer or `agy`/`claude` commands, stdout/stderr, and edited code snippets), and **Split** (live Browser stacked above a resizable live Terminal text panel) — or click **Code** / `:port` directly on any card.
   - Auto-detects listening web server ports (`:3000`–`:9999`, Vite, Next.js, Astro, Uvicorn, etc.) inside each session's child process tree (`lsof`) and maps each card to `http://localhost:<port>`.
   - Maintains a **persistent per-session `<iframe>` pool** so switching cards on the left switches live browser views instantaneously without losing SPA route, scroll position, or React state.
   - Serves on `http://localhost:7878` (dual-stack `127.0.0.1` + `::1`) so embedded `http://localhost:<port>` apps stay **same-site** and preserve Firebase Auth (`IndexedDB`), `localStorage`, and cookies.

@@ -98,7 +98,8 @@
         <span><kbd>1</kbd>–<kbd>9</kbd> jump</span>
         <span><kbd>i</kbd> reply</span>
         <span><kbd>r</kbd> reload</span>
-        <span><kbd>b</kbd> term/web</span>
+        <span><kbd>b</kbd> web/term</span>
+        <span><kbd>t</kbd> split</span>
         <span><kbd>v</kbd> grid</span>
         <span><kbd>n</kbd> new</span>
       </div>
@@ -128,14 +129,40 @@ agy --mode auto</pre>
       </div>
 
       <div class="pane-view" id="pane" hidden>
+        <div class="workspace-mode-bar" id="workspaceModeBar">
+          <div class="w-identity">
+            <span class="dot" id="bDot"></span>
+            <strong class="b-session-name" id="bName"></strong>
+            <span class="agent-chip" id="wAgentBadge" hidden></span>
+            <span class="b-branch-chip" id="bBranch" hidden></span>
+          </div>
+
+          <div class="right-mode-tabs" id="rightModeTabs" role="tablist" aria-label="Switch between Browser and Terminal code">
+            <button class="mode-tab active" type="button" role="tab" data-right-tab="browser" aria-selected="true" title="Live local browser preview (b)">
+              <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><line x1="3.6" y1="9" x2="20.4" y2="9"/><line x1="3.6" y1="15" x2="20.4" y2="15"/><path d="M11.5 3a17 17 0 0 0 0 18"/><path d="M12.5 3a17 17 0 0 1 0 18"/></svg>
+              <span>Browser</span>
+              <b class="mode-port-badge" id="wPortBadge" hidden></b>
+            </button>
+            <button class="mode-tab" type="button" role="tab" data-right-tab="terminal" aria-selected="false" title="Terminal text, commands &amp; code output (b)">
+              <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+              <span>Terminal</span>
+            </button>
+            <button class="mode-tab" type="button" role="tab" data-right-tab="split" aria-selected="false" title="Show Browser &amp; Terminal text together (t)">
+              <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><line x1="3" y1="12" x2="21" y2="12"/></svg>
+              <span>Split</span>
+            </button>
+          </div>
+
+          <div class="w-actions">
+            <button class="btn subtle compact" id="bOpenTermBtn" type="button" title="Jump to this session's native terminal app window">
+              <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+              <span id="wOpenAppLabel">Open App</span>
+            </button>
+          </div>
+        </div>
+
         <div class="browser-view" id="browserView">
           <div class="browser-bar">
-            <div class="b-identity">
-              <span class="dot" id="bDot"></span>
-              <strong class="b-session-name" id="bName"></strong>
-              <span class="b-branch-chip" id="bBranch" hidden></span>
-            </div>
-
             <div class="b-nav">
               <button class="btn icon-btn" id="bReloadBtn" type="button" aria-label="Reload session browser" title="Reload browser view (r)">
                 <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
@@ -164,14 +191,10 @@ agy --mode auto</pre>
               <button class="btn icon-btn" id="bPopOutBtn" type="button" aria-label="Open in external browser tab" title="Open URL in new browser tab">
                 <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
               </button>
-              <button class="btn subtle compact" id="bOpenTermBtn" type="button" title="Jump to this session's terminal window">
+              <button class="btn subtle compact" type="button" data-right-tab="terminal" title="Switch to Terminal text &amp; code (b)">
                 <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
-                Terminal
+                Terminal text
               </button>
-              <div class="seg" role="group" aria-label="Right panel mode">
-                <button class="seg-btn active" type="button" data-right-tab="browser" title="Live local browser view (b)">Browser</button>
-                <button class="seg-btn" type="button" data-right-tab="terminal" title="Session terminal &amp; notes (b)">Logs</button>
-              </div>
             </div>
           </div>
 
@@ -197,9 +220,13 @@ agy --mode auto</pre>
 
                 <div class="browser-empty-actions">
                   <button class="btn primary" id="bEmptyStartBtn" type="button" hidden>Start dev server</button>
-                  <button class="btn" id="bEmptyTermBtn" type="button">
+                  <button class="btn primary" id="bEmptyShowTermBtn" type="button" data-right-tab="terminal">
                     <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
-                    Open terminal
+                    Show terminal text
+                  </button>
+                  <button class="btn" id="bEmptyTermBtn" type="button">
+                    <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+                    Open terminal app
                   </button>
                 </div>
 
@@ -223,7 +250,10 @@ agy --mode auto</pre>
 
           <div class="b-reply-dock" id="bReplyDock">
             <form class="b-reply-form" id="bReplyForm" autocomplete="off">
-              <svg class="ico b-reply-ico" viewBox="0 0 24 24" aria-hidden="true"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+              <button class="btn compact subtle" type="button" id="bDockSplitBtn" data-right-tab="split" title="Show live terminal text below browser (t)">
+                <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+                Terminal
+              </button>
               <input
                 type="text"
                 id="bReplyInput"
@@ -240,15 +270,27 @@ agy --mode auto</pre>
             <div class="b-reply-readonly" id="bReplyReadonly" hidden>
               <span id="bReplyReadonlyText">Live read-only transcript. Resume in tmux to send prompts &amp; keys here.</span>
               <div class="b-reply-readonly-actions">
-                <button class="btn compact" type="button" id="bReplyOpenBtn">Open terminal</button>
+                <button class="btn compact" type="button" data-right-tab="terminal">Show terminal text</button>
+                <button class="btn compact" type="button" id="bReplyOpenBtn">Open terminal app</button>
                 <button class="btn primary compact-primary" type="button" id="bReplyAdoptBtn">Resume in tmux</button>
               </div>
             </div>
           </div>
         </div>
 
+        <div
+          class="split-resizer"
+          id="splitResizer"
+          role="separator"
+          aria-orientation="horizontal"
+          aria-label="Resize browser and terminal split"
+          tabindex="0"
+          title="Drag to resize Browser / Terminal height · Double-click to reset"
+          hidden
+        ></div>
+
         <div class="term-view" id="termView" hidden>
-          <div class="pane-head">
+          <div class="pane-head" id="termPaneHead">
             <div class="pane-title-row">
               <h1 id="pName"></h1>
               <span class="status-pill" id="pStatus"></span>
@@ -257,9 +299,9 @@ agy --mode auto</pre>
               <span class="git-chip" id="pGitChip" hidden></span>
               <span class="ticket-chip" id="pTicketChip" hidden></span>
               <span class="spacer"></span>
-              <button class="btn subtle" id="openTermBtn" type="button" title="Open or focus this session in macOS Terminal / iTerm2">
+              <button class="btn subtle" id="openTermBtn" type="button" title="Open or focus this session in macOS Terminal / iTerm2 / Ghostty">
                 <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
-                Open terminal
+                Open terminal app
               </button>
               <button class="btn primary compact-primary" id="adoptBtn" type="button" hidden>Resume in tmux</button>
               <button class="btn subtle" id="ackBtn" type="button" hidden title="Mark turn reviewed">Mark reviewed</button>
@@ -268,10 +310,6 @@ agy --mode auto</pre>
               <button class="btn subtle" id="respawnBtn" type="button" hidden>Restart pane</button>
               <button class="btn subtle" id="dismissBtn" type="button" hidden title="Hide external session from list">Hide</button>
               <button class="btn danger-outline" id="killBtn" type="button">Close</button>
-              <div class="seg" role="group" aria-label="Right panel mode">
-                <button class="seg-btn" type="button" data-right-tab="browser" title="Live local browser view (b)">Browser</button>
-                <button class="seg-btn active" type="button" data-right-tab="terminal" title="Session terminal &amp; notes (b)">Logs</button>
-              </div>
             </div>
 
           <div class="pane-task-line" id="pTaskLine"></div>

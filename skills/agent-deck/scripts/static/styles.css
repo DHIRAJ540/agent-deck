@@ -732,6 +732,10 @@ body.is-resizing .sidebar-resizer::after {
   color: var(--done);
   background: var(--done-soft);
   border-color: var(--done-border);
+  cursor: pointer;
+}
+.row-badge.dev-badge:hover {
+  filter: brightness(0.96);
 }
 .card-dur {
   font-size: 11.5px;
@@ -772,6 +776,11 @@ body.is-resizing .sidebar-resizer::after {
   color: var(--text);
   border-color: var(--line-strong);
   background: var(--panel);
+}
+.card-open-btn.is-active-mode {
+  color: var(--working);
+  border-color: var(--working-border);
+  background: var(--working-soft);
 }
 .card-open-btn.active {
   color: var(--accent);
@@ -1116,14 +1125,130 @@ body.is-resizing .sidebar-resizer::after {
   display: none;
 }
 
+/* Unified Workspace Top Mode Switcher (Browser | Terminal | Split) */
+.workspace-mode-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 7px 14px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+  flex-wrap: wrap;
+}
+.w-identity {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex: 1;
+}
+.right-mode-tabs {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 3px;
+  border-radius: 9px;
+  background: var(--sunk);
+  border: 1px solid var(--line);
+  flex-shrink: 0;
+}
+.mode-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid transparent;
+  background: transparent;
+  padding: 4px 12px;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--muted);
+  cursor: pointer;
+  transition: background 140ms ease, color 140ms ease, border-color 140ms ease;
+}
+.mode-tab:hover {
+  color: var(--text);
+}
+.mode-tab.active {
+  background: var(--panel);
+  color: var(--working);
+  border-color: var(--working-border);
+  font-weight: 600;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+}
+.mode-port-badge {
+  font: 600 11px/1.3 var(--mono);
+  padding: 1px 5px;
+  border-radius: 999px;
+  background: var(--done-soft);
+  border: 1px solid var(--done-border);
+  color: var(--done);
+}
+.mode-port-badge[hidden] {
+  display: none;
+}
+.w-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  flex: 1;
+}
+
+/* Split Mode (Browser on top + Terminal text & code below) */
+.pane-view.is-split .browser-view {
+  flex: 0 0 var(--split-top, 54%);
+  min-height: 150px;
+}
+.pane-view.is-split .term-view {
+  flex: 1 1 0;
+  min-height: 160px;
+}
+.pane-view.is-split #bReplyDock,
+.pane-view.is-split #bActionBanner,
+.pane-view.is-split #termPaneHead {
+  display: none;
+}
+
+.split-resizer {
+  height: 6px;
+  background: var(--sunk);
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  cursor: row-resize;
+  position: relative;
+  flex-shrink: 0;
+  transition: background 140ms ease;
+}
+.split-resizer[hidden] {
+  display: none;
+}
+.split-resizer::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 36px;
+  height: 2px;
+  border-radius: 999px;
+  background: var(--line-strong);
+  transform: translate(-50%, -50%);
+}
+.split-resizer:hover,
+.split-resizer.dragging {
+  background: var(--working-soft);
+  border-color: var(--working-border);
+}
+
 /* Live Local Browser Workspace */
 .browser-bar {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 7px 14px;
+  padding: 6px 14px;
   border-bottom: 1px solid var(--line);
-  background: var(--panel);
+  background: var(--sunk);
   flex-wrap: wrap;
 }
 
