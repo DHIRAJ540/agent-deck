@@ -17,7 +17,10 @@ Agent Deck gives developers a single live browser workspace (`http://localhost:7
 ## Key Capabilities
 
 - **Multi-Terminal Discovery:** Automatically tracks `tmux` panes, macOS `Terminal.app` & `iTerm2` tabs, external TTYs (`Ghostty`, `Warp`, `Cursor`, `VS Code`, `Antigravity IDE`), and active `agy` conversations (`~/.gemini/antigravity-cli/`). Automatically excludes Claude Code terminals.
-- **Rich Session Cards (Resizable Left Panel):** Displays the renamed `agy` conversation or terminal title, status (`Needs you`, `Working`, `Ready`, `Quiet`), active git worktree folder, git branch + dirty count, current task, exact turn/activity timestamps, and `1-click Open` terminal jump button.
+- **Rich Session Cards (Resizable Left Panel):** Displays the renamed `agy` conversation or terminal title, status (`Needs you`, `Working`, `Ready`, `Quiet`), active git worktree folder, git branch + dirty count, current task, exact turn/activity timestamps, inline **Reply** composer, and `1-click Open` terminal jump button.
+- **Direct Terminal Reply & 1-Click Option Selection:**
+  - Sends prompts and keystrokes (`Enter`, `Esc`, `Ctrl+C`, `1`–`9`, slash commands) directly to **Ghostty** (native Ghostty AppleScript `input text` + `send key`, without stealing window focus), **iTerm2**, **Terminal.app**, and **`tmux`** — right from the session card or the reply dock beneath the Live Browser.
+  - Extracts pending `agy` `ask_question` options, tool/command approval gates (`1. Allow once`, `2. Always allow`, `Deny (Esc)`), and TUI prompts so users can click any option directly from Agent Deck.
 - **Side-by-Side Live Browser Workspace (Right Panel):**
   - Auto-detects listening web server ports (`:3000`–`:9999`, Vite, Next.js, Astro, Uvicorn, etc.) inside each session's child process tree (`lsof`) and maps each card to `http://localhost:<port>`.
   - Maintains a **persistent per-session `<iframe>` pool** so switching cards on the left switches live browser views instantaneously without losing SPA route, scroll position, or React state.

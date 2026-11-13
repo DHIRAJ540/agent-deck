@@ -16,10 +16,11 @@
    - Skips child sub-PTYs spawned under an ancestor PID that already owns another TTY so background tasks do not create duplicate cards.
    - Ignores background editor daemons (`DAEMON_SUBTOOLS` such as `esbuild --ping`, `tsserver`, `watchman`, `gitstatusd`) when determining foreground tasks.
 
-2. **Antigravity (`agy`) Linking (`get_agy_presence`, `get_agy_summaries`):**
+2. **Antigravity (`agy`) Linking & Pending Action Extraction (`get_agy_presence`, `get_agy_summaries`, `extract_agy_pending_action`):**
    - Matches `agy` PIDs against `~/.gemini/antigravity-cli/presence/*.lock` to resolve `conversation_id`.
-   - Reads `~/.gemini/antigravity-cli/conversation_summaries.db` (read-only SQLite URI) for renamed conversation titles, active run status (`CASCADE_RUN_STATUS_RUNNING`), and `last_modified_time` / `last_user_input_time`.
-   - Reads the tail of `~/.gemini/antigravity-cli/brain/<conv_id>/.system_generated/logs/transcript.jsonl` to infer the active git worktree (`_extract_cwd_from_steps`) and latest task summary.
+   - Reads `~/.gemini/antigravity-cli/conversation_summaries.db` (read-only SQLite URI) for renamed conversation titles, active run/wait status (`CASCADE_RUN_STATUS_RUNNING`, `CASCADE_RUN_STATUS_WAITING`), and `last_modified_time` / `last_user_input_time`.
+   - Reads the tail of `~/.gemini/antigravity-cli/brain/<conv_id>/.system_generated/logs/transcript.jsonl` to infer the active git worktree (`_extract_cwd_from_steps`), latest task summary, unanswered `ask_question` multiple-choice options, and pending `run_command` / tool approval details (`pending_action`).
+   - Maps Ghostty TTYs to Ghostty's AppleScript `terminals` UUIDs (`macos_list_ghostty_terminals`, `match_ghostty_surfaces`) so Agent Deck can focus exact Ghostty tabs (`focus t`) and inject replies/choices (`input text` + `send key`) without stealing focus.
 
 3. **Listening Port Mapping (`scan_listening_ports`, `attach_browser_metadata`):**
    - Runs `lsof -nP -iTCP -sTCP:LISTEN -Fpcfn` (cached 2.5s) to map listening TCP ports (`1024 <= port < 49152`) to owning PIDs while filtering desktop GUI apps, DB ports, and Agent Deck's own port.

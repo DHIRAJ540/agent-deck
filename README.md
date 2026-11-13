@@ -5,7 +5,10 @@ One live dashboard and side-by-side local browser workspace for all your **Antig
 ## Highlights
 
 - **Discovers All Your Active Terminals Automatically:** Tracks `tmux` panes, macOS `Terminal.app` & `iTerm2` tabs, external TTYs (`Ghostty`, `Warp`, `Cursor`, `VS Code`, `Antigravity IDE`), and live `agy` conversations (`~/.gemini/antigravity-cli/`).
-- **Clear Per-Session Context (Resizable Left Panel):** Shows the renamed conversation/terminal title, status (`Needs you`, `Working`, `Ready`, `Quiet`), active git worktree folder, git branch + dirty count, current task, accurate turn/activity duration, and a 1-click **Open** terminal button.
+- **Clear Per-Session Context (Resizable Left Panel):** Shows the renamed conversation/terminal title, status (`Needs you`, `Working`, `Ready`, `Quiet`), active git worktree folder, git branch + dirty count, current task, accurate turn/activity duration, and quick **Reply** & **Open** buttons.
+- **Direct Terminal Reply & 1-Click Option Selection:**
+  - **Reply directly from the UI:** Send prompts, follow-ups, slash commands, or keystrokes (`Enter`, `Esc`, `Ctrl+C`) straight to **Ghostty** (via Ghostty's native AppleScript suite, without stealing window focus), **iTerm2**, **Terminal.app**, and **`tmux`** — either from the inline `Reply` composer on any card or from the persistent reply dock beneath the Live Browser.
+  - **1-click action & question choices:** Automatically detects pending Antigravity `ask_question` multiple-choice prompts, command/sandbox permission approvals (`1. Allow once`, `2. Always allow`, `Deny (Esc)`), and interactive TUI menus (`y/n`, numbered choices), rendering clickable option buttons directly on the session card and top of the Browser workspace.
 - **Side-by-Side Live Local Browser (Right Panel):**
   - Automatically detects listening dev server ports (`:3000`–`:9999` — Vite, Next.js, Astro, Uvicorn, etc.) inside each session's process tree (`lsof`) and maps each card to `http://localhost:<port>`.
   - Keeps a **stateful per-session `<iframe>` pool** so switching cards on the left switches browser views instantaneously without losing SPA route, open modals, or form state.
@@ -63,6 +66,7 @@ Helper flags:
 | `1` – `9` | Jump to session 1–9 |
 | `r` | Reload active session's browser view |
 | `b` | Toggle right panel between **Browser** and **Logs** |
-| `/` or `i` | Focus URL bar (in Browser view) or prompt composer (in Logs view) |
+| `i` | Focus direct terminal reply input (in Browser or Logs view) |
+| `/` | Focus URL bar (in Browser view) or terminal output search (in Logs view) |
 | `v` | Toggle Focus Workspace / Multi-Session Grid Wall |
 | `n` | Start a new `tmux` session |

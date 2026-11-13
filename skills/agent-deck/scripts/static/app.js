@@ -25,6 +25,7 @@
     gitBranch: `<svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></svg>`,
     folder: `<svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>`,
     extOpen: `<svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>`,
+    reply: `<svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><polyline points="9 10 4 15 9 20"/><path d="M20 4v7a4 4 0 0 1-4 4H4"/></svg>`,
   };
 
   let S = { seq: 0, sessions: [], events: [], recent_cwds: [], local_ports: [], now: Date.now() / 1000, home: "" };
@@ -43,6 +44,8 @@
   const paneOutputs = {}; // pane -> { hash, ansi, plain }
   const browserFramePool = new Map(); // sid -> { el, url, touched }
   const startingServers = new Set(); // sid currently booting dev server
+  const openReplyCards = new Set(); // sid with inline sidebar reply box open
+  const cardDrafts = {}; // sid -> unsent inline reply text
   let lastPortSelectSig = "";
   const prevStatus = {};
   const flashUntil = {};
@@ -508,10 +511,54 @@
     return null;
   }
 
+  function canSessionSend(s) {
+    if (!s) return false;
+    if (typeof s.can_send === "boolean") return s.can_send;
+    return ["tmux", "ghostty", "iterm2", "terminal_app"].includes(s.backend || "tmux");
+  }
+
+  function canSessionKeys(s) {
+    if (!s) return false;
+    if (typeof s.can_keys === "boolean") return s.can_keys;
+    return ["tmux", "ghostty", "iterm2", "terminal_app"].includes(s.backend || "tmux");
+  }
+
+  function effectiveChoices(s) {
+    if (s?.pending_action?.choices?.length) return s.pending_action.choices;
+    if (s?.choices?.length) return s.choices;
+    return [
+      { keys: ["1"], label: "1. Allow once", style: "primary" },
+      { keys: ["2"], label: "2. Always allow", style: "" },
+      { keys: ["y", "Enter"], label: "Yes (y)", style: "" },
+      { keys: ["Escape"], label: "Cancel (Esc)", style: "danger" },
+    ];
+  }
+
+  function renderChoiceButtons(choices, keyAttr = "data-keys", extraAttrs = "") {
+    return choices
+      .map(ch => {
+        const stCls = ch.style === "primary"
+          ? " choice-primary"
+          : ch.style === "danger"
+            ? " choice-danger"
+            : "";
+        const tip = ch.tooltip || ch.label;
+        const extra = extraAttrs ? ` ${extraAttrs}` : "";
+        return `<button type="button" class="btn compact choice-btn${stCls}"${extra} ${keyAttr}='${esc(JSON.stringify(ch.keys))}' title="${esc(tip)}">${esc(ch.label)}</button>`;
+      })
+      .join("");
+  }
+
   function renderSidebar(list) {
     const nowMs = Date.now();
     const shellCount = S.sessions.filter(s => s.status === "shell").length;
     $("#emptyShowShellsBtn").hidden = shellCount === 0 || $("#showShells").checked;
+
+    const listEl = $("#list");
+    const focusedCardInput = document.activeElement?.dataset?.cardReplyInput || null;
+    $$("input[data-card-reply-input]", listEl).forEach(inp => {
+      cardDrafts[inp.dataset.cardReplyInput] = inp.value;
+    });
 
     if (!list.length) {
       const msg = S.sessions.length
@@ -519,11 +566,11 @@
             ? "No sessions match your current filter."
             : `Only ${shellCount} plain shell${shellCount === 1 ? "" : "s"} open. Enable “Plain shells” above to view.`)
         : "No tmux panes active yet.";
-      $("#list").innerHTML = `<li class="row-meta" style="padding:12px 10px">${esc(msg)}</li>`;
+      listEl.innerHTML = `<li class="row-meta" style="padding:12px 10px">${esc(msg)}</li>`;
       return;
     }
 
-    $("#list").innerHTML = list
+    listEl.innerHTML = list
       .map((s, i) => {
         const pct = s.progress ? Math.round((100 * s.progress.done) / s.progress.total) : null;
         const timeInfo = formatSessionTime(s);
@@ -551,11 +598,46 @@
           ? `<span class="card-branch-pill" title="Git branch">${ICONS.gitBranch}${esc(s.git.branch)}${s.git.dirty ? ` *${s.git.dirty}` : ""}</span>`
           : `<span class="card-branch-pill" title="No git repository">${ICONS.gitBranch}no-branch</span>`;
 
+        const canSend = canSessionSend(s);
+        const canKeys = canSessionKeys(s);
+        const replyOpen = canSend && openReplyCards.has(s.id);
+        const replyToggleBtn = canSend
+          ? `<button type="button" class="card-open-btn card-reply-toggle${replyOpen ? " active" : ""}" data-toggle-reply="${esc(s.id)}" title="Reply directly to ${esc(termTitle)}">${ICONS.reply}Reply</button>`
+          : "";
+
+        let actionBoxHtml = "";
+        if (s.status === "needs_input") {
+          const actTitle = s.pending_action?.title || "Waiting for your confirmation";
+          const actDetail = s.pending_action?.detail || "";
+          const choicesHtml = canKeys
+            ? renderChoiceButtons(effectiveChoices(s), "data-card-keys", `data-card-pane="${esc(s.id)}"`) +
+              (canSend && !replyOpen
+                ? `<button type="button" class="btn compact choice-btn" data-toggle-reply="${esc(s.id)}" title="Type a custom reply">Reply…</button>`
+                : "")
+            : `<button type="button" class="btn compact choice-btn choice-primary" data-open-term="${esc(s.id)}">Open terminal</button>` +
+              `<button type="button" class="btn compact choice-btn" data-card-adopt="${esc(s.id)}">Resume in tmux</button>`;
+          actionBoxHtml = `<div class="card-action-box">
+            <div class="card-action-title">${esc(actTitle)}</div>
+            ${actDetail ? `<code class="card-action-detail" title="${esc(actDetail)}">${esc(actDetail)}</code>` : ""}
+            <div class="card-action-choices">${choicesHtml}</div>
+          </div>`;
+        }
+
+        const inlineReplyHtml = replyOpen
+          ? `<form class="card-reply-form" data-card-reply-form="${esc(s.id)}" autocomplete="off">
+               <input type="text" data-card-reply-input="${esc(s.id)}" placeholder="Reply to ${esc(termTitle)}…" value="${esc(cardDrafts[s.id] || "")}" aria-label="Reply to ${esc(termTitle)}">
+               <button type="submit" class="btn compact primary">Send</button>
+             </form>`
+          : "";
+
         return `<li class="session-row s-${s.status}${s.id === sel ? " sel" : ""}${flashUntil[s.id] > nowMs ? " flash" : ""}" data-id="${esc(s.id)}" tabindex="-1">
           <div class="row-top">
             <span class="dot${pulse}"></span>
             <span class="row-name" title="${esc(termTitle)}">${s.pinned ? "★ " : ""}${esc(termTitle)}</span>
-            <button type="button" class="card-open-btn" data-open-term="${esc(s.id)}" title="Open in macOS Terminal">${ICONS.extOpen}Open</button>
+            <div class="card-top-actions">
+              ${replyToggleBtn}
+              <button type="button" class="card-open-btn" data-open-term="${esc(s.id)}" title="Open in ${esc(s.host_app || "macOS Terminal")}">${ICONS.extOpen}Open</button>
+            </div>
           </div>
           <div class="card-branch-row">
             <span class="row-status">${esc(LABEL[s.status])}</span>
@@ -570,12 +652,23 @@
             ${branchPill}
           </div>
           <div class="card-task" title="${esc(taskText)}"><span class="task-lbl">Task:</span>${esc(taskText)}</div>
+          ${actionBoxHtml}
+          ${inlineReplyHtml}
           ${pct !== null ? `<div class="prog-track" title="${esc(progressText(s.progress))}"><span style="width:${pct}%"></span></div>` : ""}
           ${last ? `<div class="row-preview">${esc(last)}</div>` : ""}
           ${i < 9 ? `<span class="row-key">${i + 1}</span>` : ""}
         </li>`;
       })
       .join("");
+
+    if (focusedCardInput) {
+      const inp = $(`input[data-card-reply-input="${CSS.escape(focusedCardInput)}"]`, listEl);
+      if (inp) {
+        inp.focus();
+        const len = inp.value.length;
+        try { inp.setSelectionRange(len, len); } catch {}
+      }
+    }
   }
 
   function renderEvents() {
@@ -795,6 +888,42 @@
       srvBtn.hidden = true;
     }
 
+    const canSend = canSessionSend(s);
+    const canKeys = canSessionKeys(s);
+    const actBanner = $("#bActionBanner");
+    actBanner.hidden = s.status !== "needs_input";
+    if (s.status === "needs_input") {
+      $("#bActionTitle").textContent = s.pending_action?.title || "Waiting for your response";
+      const detEl = $("#bActionDetail");
+      const detText = s.pending_action?.detail || "";
+      detEl.hidden = !detText;
+      if (detText) {
+        detEl.textContent = detText;
+        detEl.title = detText;
+      }
+      $("#bActionChoices").innerHTML = canKeys
+        ? renderChoiceButtons(effectiveChoices(s), "data-keys")
+        : `<button type="button" class="btn compact choice-btn choice-primary" data-b-open="1">Open terminal</button>` +
+          `<button type="button" class="btn compact choice-btn" data-b-adopt="1">Resume in tmux</button>`;
+    }
+
+    const bReplyForm = $("#bReplyForm");
+    const bReplyReadonly = $("#bReplyReadonly");
+    bReplyForm.hidden = !canSend;
+    bReplyReadonly.hidden = canSend;
+    if (canSend) {
+      const hostDesc = s.backend === "tmux"
+        ? `tmux · ${s.session}:${s.window}`
+        : `${s.host_app || s.backend}${s.tty_short ? ` · ${s.tty_short}` : ""}`;
+      $("#bReplyInput").placeholder = `Reply directly to ${s.terminal_name || s.session} (${hostDesc})… (i)`;
+      $("#bReplyQuick").hidden = !canKeys;
+    } else {
+      $("#bReplyReadonlyText").textContent = s.backend === "agy_live"
+        ? "Live Antigravity IDE transcript. Resume in tmux to send prompts & keys here."
+        : `Running in ${s.host_app || "external terminal"}. Open terminal or resume in tmux to reply here.`;
+      $("#bReplyAdoptBtn").textContent = s.adopt_cmd ? "Resume in tmux" : "Open folder in tmux";
+    }
+
     syncBrowserFrames(s);
 
     if (!s.browser_url) {
@@ -928,29 +1057,27 @@
     }
 
     // Prompt banner with detected interactive options
-    const readOnlyExt = backend === "agy_live" || backend === "tty";
+    const canSend = canSessionSend(s);
+    const canKeys = canSessionKeys(s);
+    const readOnlyExt = !canSend;
     const banner = $("#promptBanner");
-    const showPrompt = s.status === "needs_input" && !readOnlyExt;
+    const showPrompt = s.status === "needs_input" && canKeys;
     banner.hidden = !showPrompt;
     if (showPrompt) {
-      const choices = s.choices && s.choices.length
-        ? s.choices
-        : [
-            { keys: ["y", "Enter"], label: "Yes (y)" },
-            { keys: ["n", "Enter"], label: "No (n)" },
-            { keys: ["Enter"], label: "Enter" },
-            { keys: ["Escape"], label: "Esc" },
-          ];
-      $("#promptChoices").innerHTML = choices
-        .map(ch =>
-          `<button type="button" class="btn compact choice-btn" data-keys='${esc(JSON.stringify(ch.keys))}'>${esc(ch.label)}</button>`
-        )
-        .join("");
+      $("#promptTitle").textContent = s.pending_action?.title || "Waiting for your response";
+      const pDet = $("#promptDetail");
+      const detTxt = s.pending_action?.detail || "";
+      pDet.hidden = !detTxt;
+      if (detTxt) {
+        pDet.textContent = detTxt;
+        pDet.title = detTxt;
+      }
+      $("#promptChoices").innerHTML = renderChoiceButtons(effectiveChoices(s), "data-keys");
     }
 
     // Show interactive controls vs read-only Adopt banner
-    $("#quick").hidden = backend !== "tmux" && backend !== "iterm2";
-    $("#agySlashBar").hidden = s.agent_kind !== "agy" || (backend !== "tmux" && backend !== "iterm2");
+    $("#quick").hidden = !canKeys;
+    $("#agySlashBar").hidden = s.agent_kind !== "agy" || !canKeys;
     $("#cmdForm").hidden = readOnlyExt;
     $("#adoptBanner").hidden = !readOnlyExt;
     if (readOnlyExt) {
@@ -987,14 +1114,12 @@
         const entry = paneOutputs[s.id];
         const rendered = entry ? ansiToHtml(entry.ansi || entry.plain || "", "", useAnsi).html : "Loading…";
         const pulse = s.status === "working" || s.status === "needs_input" ? " pulse" : "";
-        const branch = s.git?.branch ? ` · ${s.git.branch}` : "";
-        const quickChoices = s.status === "needs_input"
-          ? `<button class="btn compact choice-btn" type="button" data-tile-pane="${esc(s.id)}" data-tile-keys='["y","Enter"]'>y</button>
-             <button class="btn compact choice-btn" type="button" data-tile-pane="${esc(s.id)}" data-tile-keys='["1"]'>1</button>
-             <button class="btn compact choice-btn" type="button" data-tile-pane="${esc(s.id)}" data-tile-keys='["Enter"]'>Enter</button>`
+        const canSend = canSessionSend(s);
+        const canKeys = canSessionKeys(s);
+        const quickChoices = (s.status === "needs_input" && canKeys)
+          ? renderChoiceButtons(effectiveChoices(s).slice(0, 3), "data-tile-keys", `data-tile-pane="${esc(s.id)}"`)
           : "";
-        const backend = s.backend || "tmux";
-        const readOnlyExt = backend === "agy_live" || backend === "tty";
+        const readOnlyExt = !canSend;
         const footHtml = readOnlyExt
           ? `<div class="tile-foot">
                <span class="tile-meta" style="flex:1">${esc(s.host_app || "External")} (read-only)</span>
@@ -1002,7 +1127,7 @@
              </div>`
           : `<form class="tile-foot" data-tile-form="${esc(s.id)}" autocomplete="off">
                ${quickChoices}
-               <input type="text" data-tile-input="${esc(s.id)}" placeholder="Send to ${esc(s.session)}…" value="${esc(drafts[s.id] || "")}">
+               <input type="text" data-tile-input="${esc(s.id)}" placeholder="Reply to ${esc(s.terminal_name || s.session)}…" value="${esc(drafts[s.id] || "")}">
                <button class="btn compact primary" type="submit">Send</button>
              </form>`;
         const termTitle = s.terminal_name || s.session;
@@ -1219,8 +1344,73 @@
       openInTerminal(openBtn.dataset.openTerm);
       return;
     }
+    const toggleBtn = e.target.closest("button[data-toggle-reply]");
+    if (toggleBtn) {
+      e.stopPropagation();
+      const sid = toggleBtn.dataset.toggleReply;
+      if (openReplyCards.has(sid)) {
+        openReplyCards.delete(sid);
+        renderSidebar(visibleSessions());
+      } else {
+        openReplyCards.add(sid);
+        renderSidebar(visibleSessions());
+        const inp = $(`input[data-card-reply-input="${CSS.escape(sid)}"]`, $("#list"));
+        if (inp) inp.focus();
+      }
+      return;
+    }
+    const choiceBtn = e.target.closest("button[data-card-keys]");
+    if (choiceBtn) {
+      e.stopPropagation();
+      const sid = choiceBtn.dataset.cardPane;
+      sendAction(sid, { action: "keys", keys: JSON.parse(choiceBtn.dataset.cardKeys) }, `Sent ${choiceBtn.textContent.trim()}`);
+      return;
+    }
+    const adoptCardBtn = e.target.closest("button[data-card-adopt]");
+    if (adoptCardBtn) {
+      e.stopPropagation();
+      adoptSession(adoptCardBtn.dataset.cardAdopt);
+      return;
+    }
+    if (e.target.closest("form[data-card-reply-form]")) {
+      e.stopPropagation();
+      return;
+    }
     const r = e.target.closest(".session-row");
     if (r) selectSession(r.dataset.id);
+  });
+
+  $("#list").addEventListener("input", e => {
+    const inp = e.target.closest("input[data-card-reply-input]");
+    if (inp) cardDrafts[inp.dataset.cardReplyInput] = inp.value;
+  });
+
+  $("#list").addEventListener("keydown", e => {
+    const inp = e.target.closest("input[data-card-reply-input]");
+    if (inp && e.key === "Escape") {
+      e.preventDefault();
+      e.stopPropagation();
+      openReplyCards.delete(inp.dataset.cardReplyInput);
+      renderSidebar(visibleSessions());
+    }
+  });
+
+  $("#list").addEventListener("submit", async e => {
+    const form = e.target.closest("form[data-card-reply-form]");
+    if (!form) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const sid = form.dataset.cardReplyForm;
+    const inp = $(`input[data-card-reply-input="${CSS.escape(sid)}"]`, form);
+    const text = inp ? inp.value : "";
+    if (!text.trim()) return;
+    if (await sendAction(sid, { action: "send", text, enter: true }, "Sent reply")) {
+      history.push(text);
+      if (history.length > 60) history.shift();
+      hIdx = -1;
+      cardDrafts[sid] = "";
+      if (inp) inp.value = "";
+    }
   });
 
   $("#emptyShowShellsBtn").onclick = () => {
@@ -1288,6 +1478,46 @@
   }
   $("#quick").addEventListener("click", handleKeyClick);
   $("#promptChoices").addEventListener("click", handleKeyClick);
+  $("#bReplyQuick").addEventListener("click", handleKeyClick);
+  $("#bActionChoices").addEventListener("click", e => {
+    if (e.target.closest("button[data-b-open]")) {
+      openInTerminal(sel);
+      return;
+    }
+    if (e.target.closest("button[data-b-adopt]")) {
+      if (sel) adoptSession(sel);
+      return;
+    }
+    handleKeyClick(e);
+  });
+
+  const bReplyInput = $("#bReplyInput");
+  $("#bReplyForm").addEventListener("submit", async e => {
+    e.preventDefault();
+    if (!sel) return;
+    const text = bReplyInput.value;
+    if (!text.trim()) return;
+    if (await sendAction(sel, { action: "send", text, enter: true }, "Sent reply")) {
+      history.push(text);
+      if (history.length > 60) history.shift();
+      hIdx = -1;
+      bReplyInput.value = "";
+    }
+  });
+  bReplyInput.addEventListener("keydown", e => {
+    if (e.key === "Escape") {
+      bReplyInput.blur();
+      return;
+    }
+    if (history.length && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
+      e.preventDefault();
+      hIdx = e.key === "ArrowUp"
+        ? (hIdx < 0 ? history.length - 1 : Math.max(0, hIdx - 1))
+        : (hIdx < 0 ? -1 : hIdx + 1);
+      if (hIdx >= history.length) hIdx = -1;
+      bReplyInput.value = hIdx < 0 ? "" : history[hIdx];
+    }
+  });
 
   // Composer form (supports multi-line Shift+Enter)
   const cmdEl = $("#cmd");
@@ -1374,11 +1604,13 @@
 
   $("#adoptBtn").onclick = () => { if (sel) adoptSession(sel); };
   $("#adoptBannerBtn").onclick = () => { if (sel) adoptSession(sel); };
+  $("#bReplyAdoptBtn").onclick = () => { if (sel) adoptSession(sel); };
   $("#openTermBtn").onclick = () => openInTerminal(sel);
   $("#topOpenTermBtn").onclick = () => openInTerminal(sel);
   $("#adoptFocusBtn").onclick = () => openInTerminal(sel);
   $("#bOpenTermBtn").onclick = () => openInTerminal(sel);
   $("#bEmptyTermBtn").onclick = () => openInTerminal(sel);
+  $("#bReplyOpenBtn").onclick = () => openInTerminal(sel);
 
   // Right panel mode switch (Browser | Logs)
   function setRightTab(tab) {
@@ -1711,14 +1943,25 @@
     } else if (/^[1-9]$/.test(e.key)) {
       const target = list[Number(e.key) - 1];
       if (target) selectSession(target.id);
-    } else if (e.key === "/" || e.key === "i") {
+    } else if (e.key === "i") {
+      const s = current();
+      if (viewMode === "focus" && s) {
+        e.preventDefault();
+        if (rightTab === "browser") {
+          if (canSessionSend(s)) $("#bReplyInput").focus();
+          else $("#bUrlInput").focus();
+        } else {
+          cmdEl.focus();
+        }
+      }
+    } else if (e.key === "/") {
       if (viewMode === "focus" && current()) {
         e.preventDefault();
         if (rightTab === "browser") {
           $("#bUrlInput").focus();
           $("#bUrlInput").select();
         } else {
-          cmdEl.focus();
+          $("#termSearch").focus();
         }
       }
     } else if (e.key === "b") {

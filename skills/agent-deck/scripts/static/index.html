@@ -79,6 +79,7 @@
       <div class="shortcut-bar" aria-label="Keyboard shortcuts">
         <span><kbd>j</kbd><kbd>k</kbd> switch</span>
         <span><kbd>1</kbd>–<kbd>9</kbd> jump</span>
+        <span><kbd>i</kbd> reply</span>
         <span><kbd>r</kbd> reload</span>
         <span><kbd>b</kbd> term/web</span>
         <span><kbd>v</kbd> grid</span>
@@ -156,6 +157,17 @@ agy --mode auto</pre>
             </div>
           </div>
 
+          <div class="b-action-banner" id="bActionBanner" hidden>
+            <div class="b-action-info">
+              <span class="dot s-needs_input pulse"></span>
+              <div class="b-action-copy">
+                <strong id="bActionTitle">Waiting for your response</strong>
+                <code class="b-action-detail" id="bActionDetail" hidden></code>
+              </div>
+            </div>
+            <div class="b-action-choices" id="bActionChoices"></div>
+          </div>
+
           <div class="browser-stage" id="browserStage">
             <div class="browser-frames" id="browserFrames"></div>
 
@@ -187,6 +199,31 @@ agy --mode auto</pre>
                   >
                   <button class="btn" type="submit">Open here</button>
                 </form>
+              </div>
+            </div>
+          </div>
+
+          <div class="b-reply-dock" id="bReplyDock">
+            <form class="b-reply-form" id="bReplyForm" autocomplete="off">
+              <svg class="ico b-reply-ico" viewBox="0 0 24 24" aria-hidden="true"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+              <input
+                type="text"
+                id="bReplyInput"
+                placeholder="Reply directly to terminal… (Enter to send)"
+                aria-label="Reply directly to selected terminal"
+              >
+              <div class="b-reply-quick" id="bReplyQuick">
+                <button class="btn compact key-btn" type="button" data-keys='["Enter"]' title="Send Enter">Enter</button>
+                <button class="btn compact key-btn" type="button" data-keys='["Escape"]' title="Send Escape">Esc</button>
+                <button class="btn compact key-btn danger-text" type="button" data-keys='["C-c"]' title="Interrupt (Ctrl+C)">Ctrl+C</button>
+              </div>
+              <button class="btn primary compact-primary" type="submit" id="bReplySendBtn">Send</button>
+            </form>
+            <div class="b-reply-readonly" id="bReplyReadonly" hidden>
+              <span id="bReplyReadonlyText">Live read-only transcript. Resume in tmux to send prompts &amp; keys here.</span>
+              <div class="b-reply-readonly-actions">
+                <button class="btn compact" type="button" id="bReplyOpenBtn">Open terminal</button>
+                <button class="btn primary compact-primary" type="button" id="bReplyAdoptBtn">Resume in tmux</button>
               </div>
             </div>
           </div>
@@ -265,7 +302,10 @@ agy --mode auto</pre>
         <div class="prompt-banner" id="promptBanner" hidden>
           <div class="prompt-banner-text">
             <span class="dot s-needs_input"></span>
-            <strong id="promptTitle">Waiting for your response</strong>
+            <div class="prompt-banner-copy">
+              <strong id="promptTitle">Waiting for your response</strong>
+              <code class="prompt-detail" id="promptDetail" hidden></code>
+            </div>
           </div>
           <div class="prompt-choices" id="promptChoices"></div>
         </div>

@@ -216,6 +216,7 @@ PORT_CACHE = {"ts": 0.0, "pid_ports": {}, "all_ports": []}
 DEV_CMD_CACHE = {}
 MANAGED_SERVERS = {}
 EXTERNAL_CACHE = {"ts": 0.0, "sessions": []}
+GHOSTTY_CACHE = {"ts": 0.0, "terminals": []}
 AGY_SUMMARY_CACHE = {"ts": 0.0, "data": {}}
 AGY_PRESENCE_CACHE = {"ts": 0.0, "pid_to_conv": {}, "active_convs": set()}
 AGY_TRANSCRIPT_CACHE = {}
@@ -846,10 +847,147 @@ def _running_gui_terminals(procs):
             apps.add("Terminal.app")
         if "iTerm.app" in hay or p["comm"] == "iTerm2":
             apps.add("iTerm2")
+        if "Ghostty.app/Contents/MacOS/ghostty" in hay or p["comm"].lower() == "ghostty":
+            apps.add("Ghostty")
     return apps
 
 
 DECK_SEP = "<<<DECK_TAB_SEP>>>"
+GHOSTTY_FIELD_SEP = "<<<DECK_GFIELD>>>"
+GHOSTTY_ROW_SEP = "<<<DECK_GROW>>>"
+
+
+def macos_list_ghostty_terminals(now=None):
+    """Enumerates open Ghostty terminal surfaces (id, title, working directory) via Ghostty's AppleScript suite."""
+    if not IS_MAC or "Ghostty" in OSASCRIPT_BLOCKED:
+        return []
+    ts_now = now if now is not None else time.time()
+    if ts_now - GHOSTTY_CACHE["ts"] < 2.5 and GHOSTTY_CACHE["terminals"]:
+        return GHOSTTY_CACHE["terminals"]
+
+    script = (
+        'tell application "Ghostty"\n'
+        '  set outRows to {}\n'
+        '  repeat with t in terminals\n'
+        '    try\n'
+        f'      set end of outRows to (id of t) & "{GHOSTTY_FIELD_SEP}" & (name of t) & "{GHOSTTY_FIELD_SEP}" & (working directory of t)\n'
+        '    end try\n'
+        '  end repeat\n'
+        f'  set AppleScript\'s text item delimiters to "\\n{GHOSTTY_ROW_SEP}\\n"\n'
+        '  return outRows as text\n'
+        'end tell'
+    )
+    try:
+        r = subprocess.run(
+            ["osascript", "-e", script],
+            capture_output=True,
+            text=True,
+            timeout=1.8,
+        )
+        if r.returncode != 0:
+            err = (r.stderr or "").lower()
+            if "not authorized" in err or "-1743" in err:
+                OSASCRIPT_BLOCKED.add("Ghostty")
+            return GHOSTTY_CACHE.get("terminals", [])
+    except (OSError, subprocess.SubprocessError):
+        return GHOSTTY_CACHE.get("terminals", [])
+
+    terms = []
+    raw_out = (r.stdout or "").strip()
+    if raw_out:
+        for row in raw_out.split(f"\n{GHOSTTY_ROW_SEP}\n"):
+            parts = row.split(GHOSTTY_FIELD_SEP)
+            if len(parts) < 3:
+                continue
+            gid, gname, gcwd = parts[0].strip(), parts[1].strip(), parts[2].strip().rstrip("/")
+            if not gid:
+                continue
+            # Skip Claude Code surfaces (prefixed with ✳ or matching claude) and Agent Deck's own server tab
+            if gname.startswith("✳") or CLAUDE_PROC_RE.search(gname) or "agent_deck.py" in gname:
+                continue
+            terms.append({"id": gid, "name": gname, "cwd": gcwd})
+
+    GHOSTTY_CACHE["ts"] = ts_now
+    GHOSTTY_CACHE["terminals"] = terms
+    return terms
+
+
+def match_ghostty_surfaces(records, ghostty_terms):
+    """
+    Maps discovered Ghostty TTY records to their exact Ghostty AppleScript terminal UUID.
+    `records` is a list of dicts: {sid, conv_title, launch_cwd, cwd, agent_cmd, agent_kind}.
+    Returns {sid: {"id": ..., "name": ..., "cwd": ...}}.
+    """
+    if not records or not ghostty_terms:
+        return {}
+
+    matched = {}
+    used_ids = set()
+
+    def _norm_dir(p):
+        return (p or "").rstrip("/")
+
+    # Pass 1: exact Antigravity conversation title match (`"<title> — <folder>"` or `"<title>"`)
+    for rec in records:
+        ctitle = (rec.get("conv_title") or "").strip()
+        if not ctitle:
+            continue
+        rcwds = {_norm_dir(rec.get("launch_cwd")), _norm_dir(rec.get("cwd"))} - {""}
+        candidates = []
+        for g in ghostty_terms:
+            if g["id"] in used_ids:
+                continue
+            gname = g["name"]
+            g_prefix = gname.split(" — ")[0].strip()
+            if gname == ctitle or g_prefix == ctitle or gname.startswith(ctitle + " — "):
+                cwd_score = 0 if (_norm_dir(g["cwd"]) in rcwds) else 1
+                candidates.append((cwd_score, g))
+        if candidates:
+            candidates.sort(key=lambda item: item[0])
+            chosen = candidates[0][1]
+            matched[rec["sid"]] = chosen
+            used_ids.add(chosen["id"])
+
+    # Pass 2: non-shell foreground command title match in the same working directory
+    for rec in records:
+        if rec["sid"] in matched:
+            continue
+        acmd = (rec.get("agent_cmd") or "").strip().lower()
+        if not acmd or acmd in SHELLS:
+            continue
+        lcwd = _norm_dir(rec.get("launch_cwd"))
+        for g in ghostty_terms:
+            if g["id"] in used_ids:
+                continue
+            if acmd in g["name"].lower() and (not lcwd or _norm_dir(g["cwd"]) == lcwd):
+                matched[rec["sid"]] = g
+                used_ids.add(g["id"])
+                break
+
+    # Pass 3: unambiguous working-directory match when counts align 1-to-1
+    unmatched_by_cwd = {}
+    for rec in records:
+        if rec["sid"] in matched:
+            continue
+        lcwd = _norm_dir(rec.get("launch_cwd"))
+        if lcwd:
+            unmatched_by_cwd.setdefault(lcwd, []).append(rec)
+
+    unused_by_cwd = {}
+    for g in ghostty_terms:
+        if g["id"] in used_ids:
+            continue
+        gcwd = _norm_dir(g["cwd"])
+        if gcwd:
+            unused_by_cwd.setdefault(gcwd, []).append(g)
+
+    for lcwd, recs_in_dir in unmatched_by_cwd.items():
+        g_in_dir = unused_by_cwd.get(lcwd) or []
+        if len(recs_in_dir) == 1 and len(g_in_dir) == 1:
+            matched[recs_in_dir[0]["sid"]] = g_in_dir[0]
+            used_ids.add(g_in_dir[0]["id"])
+
+    return matched
 
 
 def macos_read_tty_tab(app_name, dev_tty):
@@ -920,9 +1058,33 @@ def macos_read_tty_tab(app_name, dev_tty):
         return "", None
 
 
-def macos_focus_tty(app_name, dev_tty):
+def macos_focus_tty(app_name, dev_tty, ghostty_id=""):
     if not IS_MAC:
         return False, "Opening/focusing GUI terminals requires macOS."
+    if app_name == "Ghostty" and ghostty_id:
+        script = (
+            'on run argv\n'
+            '  set targetId to item 1 of argv\n'
+            '  tell application "Ghostty"\n'
+            '    activate\n'
+            '    repeat with t in terminals\n'
+            '      try\n'
+            '        if (id of t) is targetId then\n'
+            '          focus t\n'
+            '          return "ok"\n'
+            '        end if\n'
+            '      end try\n'
+            '    end repeat\n'
+            '  end tell\n'
+            '  return "missing"\n'
+            'end run'
+        )
+        try:
+            r = subprocess.run(["osascript", "-e", script, ghostty_id], capture_output=True, text=True, timeout=2)
+            if r.returncode == 0 and "ok" in r.stdout:
+                return True, ""
+        except (OSError, subprocess.SubprocessError):
+            pass
     if app_name == "Terminal.app":
         script = (
             'on run argv\n'
@@ -1118,6 +1280,149 @@ def macos_send_tty_text(app_name, dev_tty, text, press_enter=True):
         if r.returncode == 0 and "ok" in r.stdout:
             return True, ""
         return False, r.stderr.strip() or "Could not write to terminal tab."
+    except (OSError, subprocess.SubprocessError) as e:
+        return False, str(e)
+
+
+GHOSTTY_KEY_MAP = {
+    "Enter": ("enter", ""),
+    "Escape": ("escape", ""),
+    "Up": ("up", ""),
+    "Down": ("down", ""),
+    "Left": ("left", ""),
+    "Right": ("right", ""),
+    "Tab": ("tab", ""),
+    "BTab": ("tab", "shift"),
+    "Space": ("space", ""),
+    "BSpace": ("backspace", ""),
+    "PageUp": ("page_up", ""),
+    "PageDown": ("page_down", ""),
+    "C-c": ("c", "control"),
+    "C-d": ("d", "control"),
+    "C-l": ("l", "control"),
+    "C-r": ("r", "control"),
+    "C-u": ("u", "control"),
+    "C-z": ("z", "control"),
+}
+
+
+def macos_send_ghostty_text(ghostty_id, text, press_enter=True):
+    """Inputs text (and optional Enter key) directly into a Ghostty terminal surface without stealing window focus."""
+    if not IS_MAC or not ghostty_id:
+        return False, "Ghostty terminal surface ID is unavailable."
+    cleaned = (text or "").replace("\r\n", "\n").replace("\r", "\n")
+    script = (
+        'on run argv\n'
+        '  set targetId to item 1 of argv\n'
+        '  set msg to item 2 of argv\n'
+        '  set doEnter to item 3 of argv\n'
+        '  tell application "Ghostty"\n'
+        '    repeat with t in terminals\n'
+        '      try\n'
+        '        if (id of t) is targetId then\n'
+        '          if msg is not "" then input text msg to t\n'
+        '          if doEnter is "1" then\n'
+        '            delay 0.06\n'
+        '            send key "enter" to t\n'
+        '          end if\n'
+        '          return "ok"\n'
+        '        end if\n'
+        '      end try\n'
+        '    end repeat\n'
+        '  end tell\n'
+        '  return "missing"\n'
+        'end run'
+    )
+    try:
+        r = subprocess.run(
+            ["osascript", "-e", script, ghostty_id, cleaned, "1" if press_enter else "0"],
+            capture_output=True,
+            text=True,
+            timeout=3.0,
+        )
+        if r.returncode == 0 and "ok" in r.stdout:
+            return True, ""
+        if "missing" in (r.stdout or ""):
+            GHOSTTY_CACHE["ts"] = 0.0
+            return False, "Ghostty tab changed — retrying scan, try again in a second."
+        return False, r.stderr.strip() or "Could not send input to Ghostty."
+    except (OSError, subprocess.SubprocessError) as e:
+        return False, str(e)
+
+
+def macos_send_ghostty_keys(ghostty_id, keys):
+    """Sends a sequence of keystrokes or slash commands directly to a Ghostty terminal surface."""
+    if not IS_MAC or not ghostty_id:
+        return False, "Ghostty terminal surface ID is unavailable."
+
+    ops = []
+    for k in keys:
+        if k.startswith("/") and len(k) > 1:
+            ops.append(("text_enter", k, ""))
+        elif k in GHOSTTY_KEY_MAP:
+            kname, mods = GHOSTTY_KEY_MAP[k]
+            ops.append(("key", kname, mods))
+        elif len(k) == 1 and k.isalnum():
+            if k.isupper():
+                ops.append(("key", k.lower(), "shift"))
+            else:
+                ops.append(("key", k.lower(), ""))
+        else:
+            return False, f"Unsupported Ghostty key: {k}"
+
+    # Encode ops as newline-separated records passed safely through argv (zero AppleScript injection risk)
+    encoded_ops = "\n".join(f"{kind}\t{val}\t{mods}" for kind, val, mods in ops)
+    script = (
+        'on run argv\n'
+        '  set targetId to item 1 of argv\n'
+        '  set rawOps to paragraphs of (item 2 of argv)\n'
+        '  tell application "Ghostty"\n'
+        '    repeat with t in terminals\n'
+        '      try\n'
+        '        if (id of t) is targetId then\n'
+        '          set AppleScript\'s text item delimiters to tab\n'
+        '          set idx to 0\n'
+        '          repeat with opLine in rawOps\n'
+        '            if (length of opLine) > 0 then\n'
+        '              if idx > 0 then delay 0.05\n'
+        '              set parts to text items of opLine\n'
+        '              set opKind to item 1 of parts\n'
+        '              set opVal to item 2 of parts\n'
+        '              set opMod to ""\n'
+        '              if (count of parts) > 2 then set opMod to item 3 of parts\n'
+        '              if opKind is "text_enter" then\n'
+        '                input text opVal to t\n'
+        '                delay 0.06\n'
+        '                send key "enter" to t\n'
+        '              else if opMod is not "" then\n'
+        '                send key opVal modifiers opMod to t\n'
+        '              else\n'
+        '                send key opVal to t\n'
+        '              end if\n'
+        '              set idx to idx + 1\n'
+        '            end if\n'
+        '          end repeat\n'
+        '          return "ok"\n'
+        '        end if\n'
+        '      end try\n'
+        '    end repeat\n'
+        '  end tell\n'
+        '  return "missing"\n'
+        'end run'
+    )
+    try:
+        r = subprocess.run(
+            ["osascript", "-e", script, ghostty_id, encoded_ops],
+            capture_output=True,
+            text=True,
+            timeout=3.0,
+        )
+        if r.returncode == 0 and "ok" in r.stdout:
+            return True, ""
+        if "missing" in (r.stdout or ""):
+            GHOSTTY_CACHE["ts"] = 0.0
+            return False, "Ghostty tab changed — retrying scan, try again in a second."
+        return False, r.stderr.strip() or "Could not send keystrokes to Ghostty."
     except (OSError, subprocess.SubprocessError) as e:
         return False, str(e)
 
@@ -1341,7 +1646,166 @@ def _extract_agy_task(steps, label="", summary_title=""):
     return latest_activity or latest_user or summary_title or "Antigravity conversation"
 
 
-def _render_agy_transcript(conv_id, steps, cwd, header_prefix="Antigravity Live Session", title=""):
+def _parse_transcript_arg(val):
+    if val is None or isinstance(val, (dict, list, bool, int, float)):
+        return val
+    s = str(val).strip()
+    if not s:
+        return ""
+    for _ in range(2):
+        if isinstance(s, str) and len(s) >= 2 and s[0] in ('"', "[", "{"):
+            try:
+                s = json.loads(s)
+                continue
+            except ValueError:
+                break
+        break
+    if isinstance(s, str):
+        return s.strip('"')
+    return s
+
+
+def extract_agy_pending_action(summary_row, t_entry):
+    """
+    Extracts structured pending questions or permission approvals for Antigravity (agy)
+    sessions from transcript.jsonl and conversation_summaries.db.
+    """
+    s_raw = (summary_row or {}).get("status", "")
+    is_waiting = "WAITING" in s_raw
+    last_step = t_entry["tail"][-1] if (t_entry and t_entry.get("tail")) else None
+    last_type = last_step.get("type", "") if last_step else ""
+    last_tcs = (last_step.get("tool_calls") or []) if (last_step and last_type == "PLANNER_RESPONSE") else []
+
+    # 1. Explicit multiple-choice question via ask_question tool call
+    for tc in last_tcs:
+        if tc.get("name") != "ask_question":
+            continue
+        targs = tc.get("args") or {}
+        q_list = _parse_transcript_arg(targs.get("questions"))
+        if not isinstance(q_list, list) or not q_list:
+            continue
+        q0 = q_list[0] if isinstance(q_list[0], dict) else {}
+        q_text = str(q0.get("question") or "Select an option").strip()
+        raw_opts = q0.get("options") if isinstance(q0.get("options"), list) else []
+        multi = bool(q0.get("is_multi_select"))
+
+        if len(q_list) > 1:
+            q_title = f"{q_text} (1/{len(q_list)})"
+            extra_qs = [
+                str(q.get("question") or "").strip()
+                for q in q_list[1:3]
+                if isinstance(q, dict) and q.get("question")
+            ]
+            q_detail = ("Next: " + " · ".join(extra_qs))[:160] if extra_qs else ""
+        else:
+            q_title = q_text
+            q_detail = "Select all that apply, then press Submit." if multi else ""
+
+        choices = []
+        for idx, opt in enumerate(raw_opts[:6], start=1):
+            opt_clean = re.sub(r"\s+", " ", str(opt or "")).strip()
+            if not opt_clean:
+                continue
+            is_rec = opt_clean.lower().startswith("(recommended)")
+            disp = re.sub(r"^\(recommended\)\s*", "", opt_clean, flags=re.I)
+            short_disp = disp if len(disp) <= 44 else disp[:43] + "…"
+            choices.append({
+                "type": "keys",
+                "keys": [str(idx)],
+                "label": f"{idx}. {short_disp}",
+                "tooltip": f"{idx}. {opt_clean}",
+                "style": "primary" if (idx == 1 and is_rec and not multi) else "",
+            })
+        if multi:
+            choices.append({
+                "type": "keys",
+                "keys": ["Enter"],
+                "label": "Submit (Enter)",
+                "tooltip": "Submit selected choices",
+                "style": "primary",
+            })
+        choices.append({
+            "type": "keys",
+            "keys": ["Escape"],
+            "label": "Cancel (Esc)",
+            "tooltip": "Cancel question prompt",
+            "style": "subtle",
+        })
+        return {
+            "kind": "question",
+            "title": q_title[:140],
+            "detail": q_detail,
+            "choices": choices,
+        }
+
+    # 2. Tool / command / sandbox approval gate (CASCADE_RUN_STATUS_WAITING)
+    if is_waiting:
+        chosen_tc = None
+        for tc in reversed(last_tcs):
+            if tc.get("name") == "run_command":
+                chosen_tc = tc
+                break
+        if not chosen_tc and last_tcs:
+            chosen_tc = last_tcs[-1]
+
+        title = "Action approval required"
+        detail = ""
+        if chosen_tc:
+            tname = chosen_tc.get("name") or "tool"
+            targs = chosen_tc.get("args") or {}
+            if tname == "run_command":
+                cmd_line = str(_parse_transcript_arg(targs.get("CommandLine")) or "").strip()
+                tsum = str(_parse_transcript_arg(targs.get("toolSummary")) or "").strip()
+                bypass = str(_parse_transcript_arg(targs.get("BypassSandbox")) or "").lower() == "true"
+                prefix = "Approve unsandboxed command" if bypass else "Approve command"
+                title = f"{prefix}: {tsum or _shorten_cmd(cmd_line, 56) or 'terminal command'}"
+                detail = cmd_line[:180]
+            else:
+                target_val = str(
+                    _parse_transcript_arg(
+                        targs.get("Path") or targs.get("DirectoryPath") or targs.get("url") or targs.get("toolSummary")
+                    ) or ""
+                ).strip()
+                short_t = os.path.basename(target_val.rstrip("/")) if target_val.startswith("/") else target_val[:56]
+                title = f"Approve {tname}{f': {short_t}' if short_t else ''}"
+                detail = target_val[:180] if target_val != short_t else ""
+        elif summary_row and summary_row.get("preview"):
+            detail = summary_row["preview"][:150]
+
+        choices = [
+            {
+                "type": "keys",
+                "keys": ["1"],
+                "label": "1. Allow once",
+                "tooltip": "Approve this action once",
+                "style": "primary",
+            },
+            {
+                "type": "keys",
+                "keys": ["2"],
+                "label": "2. Always allow",
+                "tooltip": "Approve and persist allow rule",
+                "style": "",
+            },
+            {
+                "type": "keys",
+                "keys": ["Escape"],
+                "label": "Deny (Esc)",
+                "tooltip": "Reject / cancel action",
+                "style": "danger",
+            },
+        ]
+        return {
+            "kind": "approval",
+            "title": title[:140],
+            "detail": detail,
+            "choices": choices,
+        }
+
+    return None
+
+
+def _render_agy_transcript(conv_id, steps, cwd, header_prefix="Antigravity Live Session", title="", pending_action=None):
     title_str = f" — {title}" if title else ""
     lines = [
         f"\x1b[1;36m{header_prefix}{title_str}\x1b[0m  \x1b[2m({conv_id})\x1b[0m",
@@ -1373,6 +1837,12 @@ def _render_agy_transcript(conv_id, steps, cwd, header_prefix="Antigravity Live 
                 lines.append(f"\x1b[33m  ⚙ {tname}\x1b[0m \x1b[2m{summary}\x1b[0m")
             if content.strip():
                 lines.append(f"\n\x1b[1;34m◆ Antigravity\x1b[0m\n{content.strip()}")
+    if pending_action:
+        lines.append("\n\x1b[1;33m● Action Needed — " + pending_action["title"] + "\x1b[0m")
+        if pending_action.get("detail"):
+            lines.append(f"\x1b[2m  {pending_action['detail']}\x1b[0m")
+        for ch in pending_action.get("choices") or []:
+            lines.append(f"  \x1b[36m[{ch['label']}]\x1b[0m")
     return "\n".join(lines)
 
 
@@ -1383,7 +1853,7 @@ def _classify_agy_from_metadata(summary_row, t_entry, info, now):
         last_type = last_step.get("type", "")
         last_tcs = last_step.get("tool_calls") or []
         age = now - t_entry["mtime"]
-        if any(tc.get("name") == "ask_question" for tc in last_tcs) and age < 7200:
+        if last_type == "PLANNER_RESPONSE" and any(tc.get("name") == "ask_question" for tc in last_tcs) and age < 7200:
             return "needs_input", subtool
         if summary_row:
             s_raw = summary_row.get("status", "")
@@ -1410,6 +1880,8 @@ def _classify_agy_from_metadata(summary_row, t_entry, info, now):
 
     if summary_row:
         s_raw = summary_row.get("status", "")
+        if "WAITING" in s_raw:
+            return "needs_input", subtool
         if "RUNNING" in s_raw or summary_row.get("not_fully_idle") or subtool:
             return "working", subtool
     return ("working" if subtool else "idle"), subtool
@@ -1509,13 +1981,15 @@ def discover_external_ttys(proc_snapshot, now):
     results = []
     seen_convs = set()
 
+    prepared = []
+    ghostty_candidates = []
+
     for tty, root_pid, focus_pid, host_app, info, lineage in tty_entries:
         sid = f"tty:{tty}"
         if sid in DISMISSED:
             continue
         launch_cwd = cwd_map.get(focus_pid) or cwd_map.get(root_pid) or HOME
         cwd = launch_cwd
-        dev_tty = f"/dev/{tty}"
 
         conv_id = (info["agent_meta"] or {}).get("conversation")
         if not conv_id and info["agent_kind"] == "agy":
@@ -1544,8 +2018,59 @@ def discover_external_ttys(proc_snapshot, now):
         elif info.get("dev_cwd"):
             cwd = info["dev_cwd"]
 
+        rec = {
+            "sid": sid,
+            "tty": tty,
+            "root_pid": root_pid,
+            "focus_pid": focus_pid,
+            "host_app": host_app,
+            "info": info,
+            "launch_cwd": launch_cwd,
+            "cwd": cwd,
+            "conv_id": conv_id,
+            "summary_row": summary_row,
+            "conv_title": conv_title,
+            "t_entry": t_entry,
+            "agent_cmd": info["agent_cmd"],
+            "agent_kind": info["agent_kind"],
+        }
+        prepared.append(rec)
+        if host_app == "Ghostty" and "Ghostty" in running_gui:
+            ghostty_candidates.append(rec)
+
+    ghostty_map = (
+        match_ghostty_surfaces(ghostty_candidates, macos_list_ghostty_terminals(now))
+        if ghostty_candidates
+        else {}
+    )
+
+    for rec in prepared:
+        sid = rec["sid"]
+        tty = rec["tty"]
+        root_pid = rec["root_pid"]
+        focus_pid = rec["focus_pid"]
+        host_app = rec["host_app"]
+        info = rec["info"]
+        cwd = rec["cwd"]
+        conv_id = rec["conv_id"]
+        summary_row = rec["summary_row"]
+        conv_title = rec["conv_title"]
+        t_entry = rec["t_entry"]
+        dev_tty = f"/dev/{tty}"
+
+        g_surf = ghostty_map.get(sid)
+        ghostty_id = g_surf["id"] if g_surf else ""
+
         can_script = host_app in running_gui and host_app in ("Terminal.app", "iTerm2")
         tab_title, raw_screen = macos_read_tty_tab(host_app, dev_tty) if can_script else ("", None)
+        if not tab_title and g_surf:
+            tab_title = g_surf.get("name") or ""
+
+        agy_action = (
+            extract_agy_pending_action(summary_row, t_entry)
+            if info["agent_kind"] == "agy" and (summary_row or t_entry)
+            else None
+        )
 
         if raw_screen:
             ansi_text = raw_screen[-18000:]
@@ -1557,17 +2082,23 @@ def discover_external_ttys(proc_snapshot, now):
                 cwd,
                 header_prefix=f"{host_app} · {tty}",
                 title=conv_title,
+                pending_action=agy_action,
             )
             plain_text = strip_ansi(ansi_text)
         else:
             kind_str = (info["agent_kind"] or info["agent_cmd"] or "shell").upper()
             sub_str = f" → {info['subtool_cmd']}" if info.get("subtool_cmd") else ""
+            ctrl_note = (
+                "Direct reply & keystroke control enabled via Ghostty AppleScript."
+                if ghostty_id
+                else f"Click 'Open Terminal' to jump to its window, or 'Resume in tmux' to control this {kind_str} session inside Agent Deck."
+            )
             ansi_text = (
                 f"\x1b[1;36m{host_app} · {dev_tty}\x1b[0m\n"
                 f"Process:  \x1b[1m{info['agent_cmd']}{sub_str}\x1b[0m (PID {focus_pid})\n"
                 f"Folder:   {cwd}\n\n"
                 f"\x1b[2m{host_app} keeps its screen buffer private on macOS.\n"
-                f"Click 'Open Terminal' to jump to its window, or 'Resume in tmux' to control this {kind_str} session inside Agent Deck.\x1b[0m"
+                f"{ctrl_note}\x1b[0m"
             )
             plain_text = strip_ansi(ansi_text)
 
@@ -1611,12 +2142,36 @@ def discover_external_ttys(proc_snapshot, now):
             tr["last_change_exact"] = True
 
         effective_subtool = info.get("subtool")
+        pending_action = None
         if raw_screen:
             fake_p = {"dead": False}
             status, choices = classify(fake_p, plain_text, info, tr, now)
+            if agy_action and status != "working":
+                status = "needs_input"
+                pending_action = agy_action
+                choices = agy_action["choices"]
+            elif status == "needs_input":
+                pending_action = extract_screen_pending_action(plain_text, choices)
+                choices = pending_action["choices"]
         elif info["agent_kind"] == "agy" and (summary_row or t_entry):
             status, effective_subtool = _classify_agy_from_metadata(summary_row, t_entry, info, now)
-            choices = []
+            if status == "needs_input" and agy_action:
+                pending_action = agy_action
+                choices = agy_action["choices"]
+            elif status == "needs_input":
+                pending_action = {
+                    "kind": "approval",
+                    "title": "Waiting for your confirmation",
+                    "detail": "",
+                    "choices": [
+                        {"type": "keys", "keys": ["1"], "label": "1. Allow once", "style": "primary"},
+                        {"type": "keys", "keys": ["2"], "label": "2. Always allow", "style": ""},
+                        {"type": "keys", "keys": ["Escape"], "label": "Deny (Esc)", "style": "danger"},
+                    ],
+                }
+                choices = pending_action["choices"]
+            else:
+                choices = []
         else:
             if info["agent_running"]:
                 status = "working" if info.get("subtool") else "idle"
@@ -1631,14 +2186,23 @@ def discover_external_ttys(proc_snapshot, now):
             tr["work_started_at"] = None
 
         turn_since = (summary_input_ts or tr["work_started_at"]) if status == "working" else None
+        if tr["status"] is not None and tr["status"] != status:
+            add_event({"id": sid, "target": sid, "session": conv_title or tty}, tr["status"], status, now)
         tr["status"] = status
         git_info = get_git_info(cwd, now)
         folder_name = os.path.basename(cwd.rstrip("/")) or tty
         clean_tab = re.sub(r"\s*—\s*-?(?:zsh|bash|fish).*$", "", tab_title or "").strip()
-        terminal_name = conv_title or clean_tab or f"{folder_name} ({tty})"
+        if conv_title:
+            terminal_name = conv_title
+        elif clean_tab:
+            terminal_name = clean_tab.split(" — ")[0].strip() if " — " in clean_tab else clean_tab
+        else:
+            terminal_name = f"{folder_name} ({tty})"
 
         label_val = LABELS.get(sid, "")
-        if t_entry and not raw_screen:
+        if pending_action and not label_val:
+            current_task = pending_action["title"]
+        elif t_entry and not raw_screen:
             if label_val:
                 current_task = label_val
             elif info.get("subtool_cmd"):
@@ -1657,10 +2221,25 @@ def discover_external_ttys(proc_snapshot, now):
         if info["agent_kind"] == "agy":
             adopt_cmd = f"agy --conversation {conv_id}" if conv_id else "agy --continue"
 
+        if can_script and host_app == "iTerm2":
+            backend = "iterm2"
+        elif can_script:
+            backend = "terminal_app"
+        elif ghostty_id:
+            backend = "ghostty"
+        else:
+            backend = "tty"
+
+        can_send = backend in ("ghostty", "iterm2", "terminal_app")
+        can_keys = backend in ("ghostty", "iterm2", "terminal_app")
+
         results.append({
             "id": sid,
             "target": sid,
-            "backend": "iterm2" if (can_script and host_app == "iTerm2") else ("terminal_app" if can_script else "tty"),
+            "backend": backend,
+            "can_send": can_send,
+            "can_keys": can_keys,
+            "ghostty_id": ghostty_id,
             "host_app": host_app,
             "tty": dev_tty,
             "tty_short": tty,
@@ -1685,6 +2264,7 @@ def discover_external_ttys(proc_snapshot, now):
             "git": git_info,
             "status": status,
             "choices": choices,
+            "pending_action": pending_action,
             "dead_status": "",
             "label": label_val,
             "pinned": sid in PINNED,
@@ -1756,12 +2336,14 @@ def discover_agy_brain_sessions(already_tracked_convs, now):
         summary_row = summaries.get(conv_id)
         conv_title = (summary_row or {}).get("title", "")
 
-        ansi_text = _render_agy_transcript(conv_id, tail_steps, cwd, title=conv_title)
+        status, subtool = _classify_agy_from_metadata(summary_row, t_entry, {"subtool": None}, now)
+        pending_action = extract_agy_pending_action(summary_row, t_entry) if status == "needs_input" else None
+        choices = pending_action["choices"] if pending_action else []
+
+        ansi_text = _render_agy_transcript(conv_id, tail_steps, cwd, title=conv_title, pending_action=pending_action)
         plain_text = strip_ansi(ansi_text)
         digest = hashlib.sha1(ansi_text.encode("utf-8", "replace")).hexdigest()
         OUTPUT_CACHE[sid] = {"ansi": ansi_text, "plain": plain_text, "hash": digest, "ts": now}
-
-        status, subtool = _classify_agy_from_metadata(summary_row, t_entry, {"subtool": None}, now)
 
         ticket_match = None
         for m in TICKET_RE.finditer("\n".join(non_empty_tail(plain_text, 30))):
@@ -1770,7 +2352,10 @@ def discover_agy_brain_sessions(already_tracked_convs, now):
         folder_name = os.path.basename(cwd.rstrip("/")) or "agy"
         sess_name = conv_title or f"{folder_name} ({conv_id[:6]})"
         label_val = LABELS.get(sid, "")
-        current_task = _extract_agy_task(tail_steps, label=label_val, summary_title=conv_title)
+        if pending_action and not label_val:
+            current_task = pending_action["title"]
+        else:
+            current_task = _extract_agy_task(tail_steps, label=label_val, summary_title=conv_title)
         git_info = get_git_info(cwd, now)
 
         summary_mod_ts = (summary_row or {}).get("last_modified_ts")
@@ -1781,6 +2366,8 @@ def discover_agy_brain_sessions(already_tracked_convs, now):
             "id": sid,
             "target": sid,
             "backend": "agy_live",
+            "can_send": False,
+            "can_keys": False,
             "host_app": "Antigravity",
             "conversation_id": conv_id,
             "conversation_title": conv_title,
@@ -1801,7 +2388,8 @@ def discover_agy_brain_sessions(already_tracked_convs, now):
             "cwd": cwd,
             "git": git_info,
             "status": status,
-            "choices": [],
+            "choices": choices,
+            "pending_action": pending_action,
             "dead_status": "",
             "label": label_val,
             "pinned": sid in PINNED,
@@ -2163,10 +2751,48 @@ def extract_prompt_choices(lines):
         ]
     if re.search(r"\ballow once\b", joined, re.I):
         return [
-            {"type": "keys", "keys": ["Enter"], "label": "Confirm (Enter)"},
-            {"type": "keys", "keys": ["Escape"], "label": "Cancel (Esc)"},
+            {"type": "keys", "keys": ["1"], "label": "1. Allow once", "style": "primary"},
+            {"type": "keys", "keys": ["2"], "label": "2. Always allow", "style": ""},
+            {"type": "keys", "keys": ["Escape"], "label": "Deny (Esc)", "style": "danger"},
         ]
     return []
+
+
+def extract_screen_pending_action(plain_text, choices=None):
+    lines = non_empty_tail(plain_text, 14)
+    if choices is None:
+        choices = extract_prompt_choices(lines)
+    if not choices:
+        choices = [
+            {"type": "keys", "keys": ["y", "Enter"], "label": "Yes (y)", "style": "primary"},
+            {"type": "keys", "keys": ["n", "Enter"], "label": "No (n)", "style": ""},
+            {"type": "keys", "keys": ["Enter"], "label": "Enter", "style": ""},
+            {"type": "keys", "keys": ["Escape"], "label": "Esc", "style": "subtle"},
+        ]
+
+    title = "Waiting for your response"
+    # Prefer a question/prompt line above numbered menu rows
+    first_menu_idx = next((i for i, ln in enumerate(lines) if MENU_OPTION_RE.match(ln)), -1)
+    if first_menu_idx > 0:
+        for ln in reversed(lines[:first_menu_idx]):
+            cleaned = re.sub(r"\s+", " ", ln).strip()
+            if len(cleaned) >= 4:
+                title = cleaned[:130]
+                break
+    else:
+        for ln in reversed(lines[-10:]):
+            if MENU_OPTION_RE.match(ln):
+                continue
+            if any(p.search(ln) for p in INPUT_RE):
+                title = re.sub(r"\s+", " ", ln).strip()[:130]
+                break
+
+    return {
+        "kind": "prompt",
+        "title": title,
+        "detail": "",
+        "choices": choices,
+    }
 
 
 def parse_progress(text):
@@ -2359,6 +2985,19 @@ def refresh(force_external=False):
             tr["agent_ended"] = now
 
         status, choices = classify(p, plain_text, proc_info, tr, now)
+        agy_action = (
+            extract_agy_pending_action(summary_row, t_entry)
+            if (proc_info.get("agent_kind") == "agy" and (summary_row or t_entry))
+            else None
+        )
+        pending_action = None
+        if agy_action and status != "working":
+            status = "needs_input"
+            pending_action = agy_action
+            choices = agy_action["choices"]
+        elif status == "needs_input":
+            pending_action = extract_screen_pending_action(plain_text, choices)
+            choices = pending_action["choices"]
 
         if status == "working":
             if tr["work_started_at"] is None:
@@ -2380,7 +3019,9 @@ def refresh(force_external=False):
 
         git_info = get_git_info(eff_cwd, now)
         label_val = LABELS.get(p["target"], "")
-        if t_entry and not label_val and not proc_info.get("subtool_cmd"):
+        if pending_action and not label_val:
+            current_task = pending_action["title"]
+        elif t_entry and not label_val and not proc_info.get("subtool_cmd"):
             current_task = _extract_agy_task(t_entry["tail"], label="", summary_title=conv_title)
         else:
             current_task = infer_current_task(plain_text, proc_info, status, label=label_val)
@@ -2398,6 +3039,8 @@ def refresh(force_external=False):
             "id": p["id"],
             "target": p["target"],
             "backend": "tmux",
+            "can_send": True,
+            "can_keys": True,
             "host_app": "tmux",
             "conversation_id": conv,
             "conversation_title": conv_title,
@@ -2419,6 +3062,7 @@ def refresh(force_external=False):
             "git": git_info,
             "status": status,
             "choices": choices,
+            "pending_action": pending_action,
             "dead_status": p["dead_status"],
             "label": label_val,
             "pinned": p["target"] in PINNED,
@@ -2608,8 +3252,12 @@ def do_open_terminal(sess):
         ok, err = macos_open_in_terminal_app(shell_cmd=f"tmux attach -t {quoted}")
         return (200, {"ok": True}) if ok else (400, {"ok": False, "error": err})
 
-    if backend in ("iterm2", "terminal_app", "tty"):
-        ok, err = macos_focus_tty(sess.get("host_app", ""), sess.get("tty", ""))
+    if backend in ("ghostty", "iterm2", "terminal_app", "tty"):
+        ok, err = macos_focus_tty(
+            sess.get("host_app", ""),
+            sess.get("tty", ""),
+            ghostty_id=sess.get("ghostty_id", ""),
+        )
         if ok:
             return 200, {"ok": True}
         # Fallback: open a Terminal window in the same folder
@@ -2792,9 +3440,19 @@ def do_action(body):
 
     if backend != "tmux":
         if action == "send":
+            text = str(body.get("text", ""))
+            if len(text) > 12000:
+                return 400, {"ok": False, "error": "Message is too long (12,000 characters max)."}
+            enter = bool(body.get("enter", True))
+            if backend == "ghostty" and sess.get("ghostty_id"):
+                reset_turn_tracking(sid)
+                ok, err = macos_send_ghostty_text(sess["ghostty_id"], text, press_enter=enter)
+                if ok:
+                    trigger_fast_refresh(force_external=True)
+                    return 200, {"ok": True}
+                return 400, {"ok": False, "error": err}
             if backend in ("iterm2", "terminal_app"):
-                text = str(body.get("text", ""))
-                enter = bool(body.get("enter", True))
+                reset_turn_tracking(sid)
                 ok, err = macos_send_tty_text(sess["host_app"], sess["tty"], text, press_enter=enter)
                 if ok:
                     trigger_fast_refresh(force_external=True)
@@ -2804,16 +3462,65 @@ def do_action(body):
                 "ok": False,
                 "error": "Click 'Resume in tmux' first to send prompts & keys to this session.",
             }
-        if action == "keys" and backend == "iterm2":
+        if action == "keys":
             keys = body.get("keys") or []
-            key_map = {"Enter": "\r", "Escape": "\x1b", "C-c": "\x03", "C-d": "\x04", "Tab": "\t", "Space": " "}
-            seq = "".join(key_map.get(k, k if len(k) == 1 else "") for k in keys)
-            if seq:
-                ok, err = macos_send_tty_text("iTerm2", sess["tty"], seq, press_enter=False)
+            if (
+                not isinstance(keys, list)
+                or not keys
+                or len(keys) > 10
+                or not all(isinstance(k, str) and KEY_OK.match(k) for k in keys)
+            ):
+                return 400, {"ok": False, "error": "Unsupported key sequence."}
+            if backend == "ghostty" and sess.get("ghostty_id"):
+                reset_turn_tracking(sid)
+                ok, err = macos_send_ghostty_keys(sess["ghostty_id"], keys)
                 if ok:
                     trigger_fast_refresh(force_external=True)
                     return 200, {"ok": True}
                 return 400, {"ok": False, "error": err}
+            if backend == "iterm2":
+                key_map = {
+                    "Enter": "\r",
+                    "Escape": "\x1b",
+                    "C-c": "\x03",
+                    "C-d": "\x04",
+                    "C-l": "\x0c",
+                    "C-u": "\x15",
+                    "Tab": "\t",
+                    "BTab": "\x1b[Z",
+                    "Space": " ",
+                    "BSpace": "\x7f",
+                    "Up": "\x1b[A",
+                    "Down": "\x1b[B",
+                    "Right": "\x1b[C",
+                    "Left": "\x1b[D",
+                }
+                seq_parts = []
+                for k in keys:
+                    if k.startswith("/") and len(k) > 1:
+                        seq_parts.append(k + "\r")
+                    elif k in key_map:
+                        seq_parts.append(key_map[k])
+                    elif len(k) == 1:
+                        seq_parts.append(k)
+                seq = "".join(seq_parts)
+                if seq:
+                    reset_turn_tracking(sid)
+                    ok, err = macos_send_tty_text("iTerm2", sess["tty"], seq, press_enter=False)
+                    if ok:
+                        trigger_fast_refresh(force_external=True)
+                        return 200, {"ok": True}
+                    return 400, {"ok": False, "error": err}
+            if backend == "terminal_app":
+                # Terminal.app `do script` sends line input + Enter
+                printable = [k for k in keys if (len(k) == 1 and k.isalnum()) or (k.startswith("/") and len(k) > 1)]
+                if printable or keys == ["Enter"]:
+                    reset_turn_tracking(sid)
+                    ok, err = macos_send_tty_text("Terminal.app", sess["tty"], "".join(printable), press_enter=True)
+                    if ok:
+                        trigger_fast_refresh(force_external=True)
+                        return 200, {"ok": True}
+                    return 400, {"ok": False, "error": err}
         return 400, {
             "ok": False,
             "error": "Click 'Resume in tmux' above for full interactive keystroke control.",
