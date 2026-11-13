@@ -35,6 +35,8 @@
   let viewMode = pref("viewMode", "focus"); // "focus" | "grid"
   let rightTab = pref("rightTab", "browser"); // "browser" | "terminal"
   let mobilePreview = pref("mobilePreview", false);
+  let agentFilter = pref("agentFilter", "both"); // "both" | "agy" | "claude"
+  if (!["both", "agy", "claude"].includes(agentFilter)) agentFilter = "both";
   let statusFilter = "all";
   let searchFilter = "";
   let termQuery = "";
@@ -334,15 +336,27 @@
 
   /* ---------- Filtering & Selection ---------- */
 
-  function visibleSessions() {
+  function passesBaseToggleFilter(s) {
     const shells = $("#showShells").checked;
     const showExt = $("#showExternal").checked;
+    const isExt = (s.backend || "tmux") !== "tmux";
+    if (isExt && !showExt && !s.pinned) return false;
+    if (!shells && s.status === "shell" && !s.pinned) return false;
+    return true;
+  }
+
+  function matchesAgentTab(s, tab = agentFilter) {
+    if (tab === "agy") return s.agent_kind === "agy";
+    if (tab === "claude") return s.agent_kind === "claude";
+    return true;
+  }
+
+  function visibleSessions() {
     const q = searchFilter.trim().toLowerCase();
     return S.sessions
       .filter(s => {
-        const isExt = (s.backend || "tmux") !== "tmux";
-        if (isExt && !showExt && !s.pinned) return false;
-        if (!shells && s.status === "shell" && !s.pinned) return false;
+        if (!passesBaseToggleFilter(s)) return false;
+        if (!matchesAgentTab(s, agentFilter)) return false;
         if (statusFilter !== "all" && s.status !== statusFilter) return false;
         if (q) {
           const hay = [
@@ -373,7 +387,7 @@
       });
   }
 
-  const current = () => S.sessions.find(s => s.id === sel);
+  const current = () => S.sessions.find(s => s.id === sel && matchesAgentTab(s, agentFilter));
 
   /* ---------- Alerts & Sound ---------- */
 
@@ -438,20 +452,57 @@
     if (!kind || kind === "program") return null;
     const parts = [kind.toUpperCase()];
     const m = s.agent_meta || {};
+    if (m.model) parts.push(m.model);
     if (m.mode) parts.push(m.mode);
     if (m.effort) parts.push(m.effort);
     if (m.sandbox) parts.push("sandbox");
+    if (m.skip_perms) parts.push("skip-perms");
     return parts.join(" · ");
+  }
+
+  function renderAgentTabs() {
+    let bothCount = 0;
+    let agyCount = 0;
+    let claudeCount = 0;
+    let bothNeeds = false;
+    let agyNeeds = false;
+    let claudeNeeds = false;
+
+    S.sessions.forEach(s => {
+      if (!passesBaseToggleFilter(s)) return;
+      bothCount++;
+      if (s.status === "needs_input") bothNeeds = true;
+      if (s.agent_kind === "agy") {
+        agyCount++;
+        if (s.status === "needs_input") agyNeeds = true;
+      } else if (s.agent_kind === "claude") {
+        claudeCount++;
+        if (s.status === "needs_input") claudeNeeds = true;
+      }
+    });
+
+    $("#agentCountBoth").textContent = String(bothCount);
+    $("#agentCountAgy").textContent = String(agyCount);
+    $("#agentCountClaude").textContent = String(claudeCount);
+
+    $$("button[data-agent-tab]").forEach(btn => {
+      const key = btn.dataset.agentTab;
+      const isAct = key === agentFilter;
+      const needs = key === "both" ? bothNeeds : key === "agy" ? agyNeeds : claudeNeeds;
+      btn.classList.toggle("active", isAct);
+      btn.classList.toggle("has-needs", needs);
+      btn.setAttribute("aria-selected", isAct ? "true" : "false");
+    });
   }
 
   function renderCounts() {
     const c = { all: 0, needs_input: 0, working: 0, done: 0, idle: 0, exited: 0 };
-    const shells = $("#showShells").checked;
-    const showExt = $("#showExternal").checked;
+    let totalNeedsAcrossAll = 0;
     S.sessions.forEach(s => {
-      const isExt = (s.backend || "tmux") !== "tmux";
-      if (isExt && !showExt && !s.pinned) return;
-      if (shells || s.status !== "shell" || s.pinned) c.all++;
+      if (!passesBaseToggleFilter(s)) return;
+      if (s.status === "needs_input") totalNeedsAcrossAll++;
+      if (!matchesAgentTab(s, agentFilter)) return;
+      c.all++;
       if (s.status in c) c[s.status]++;
     });
 
@@ -477,7 +528,7 @@
       })
       .join("");
 
-    document.title = (c.needs_input ? `(${c.needs_input}) ` : "") + "Agent Deck";
+    document.title = (totalNeedsAcrossAll ? `(${totalNeedsAcrossAll}) ` : "") + "Agent Deck";
   }
 
   function progressText(p) {
@@ -561,11 +612,16 @@
     });
 
     if (!list.length) {
-      const msg = S.sessions.length
-        ? (statusFilter !== "all" || searchFilter
-            ? "No sessions match your current filter."
-            : `Only ${shellCount} plain shell${shellCount === 1 ? "" : "s"} open. Enable “Plain shells” above to view.`)
-        : "No tmux panes active yet.";
+      let msg = "No active agent sessions yet.";
+      if (statusFilter !== "all" || searchFilter) {
+        msg = "No sessions match your current filter.";
+      } else if (agentFilter === "claude") {
+        msg = "No Claude Code sessions running right now.";
+      } else if (agentFilter === "agy") {
+        msg = "No Antigravity (agy) sessions running right now.";
+      } else if (shellCount > 0 && !$("#showShells").checked) {
+        msg = `Only ${shellCount} plain shell${shellCount === 1 ? "" : "s"} open. Enable “Plain shells” above to view.`;
+      }
       listEl.innerHTML = `<li class="row-meta" style="padding:12px 10px">${esc(msg)}</li>`;
       return;
     }
@@ -952,11 +1008,35 @@
     }
   }
 
+  function renderEmptyState() {
+    const anyBaseSessions = S.sessions.some(passesBaseToggleFilter);
+    if (agentFilter === "claude") {
+      $("#emptyTitle").textContent = "No Claude Code sessions running yet";
+      $("#emptyDesc").innerHTML = "Start a Claude Code (<code>claude</code>) session directly from here, or launch one in any terminal:";
+      $("#emptyCode").textContent = "tmux new -s feature-work\nclaude";
+      $("#emptyNewBtn").textContent = "Start a Claude session";
+      $("#emptyShowBothBtn").hidden = !anyBaseSessions;
+    } else if (agentFilter === "agy") {
+      $("#emptyTitle").textContent = "No Antigravity (agy) sessions running yet";
+      $("#emptyDesc").innerHTML = "Start an Antigravity (<code>agy</code>) session directly from here, or launch one in any terminal:";
+      $("#emptyCode").textContent = "tmux new -s feature-work\nagy --mode auto";
+      $("#emptyNewBtn").textContent = "Start an agy session";
+      $("#emptyShowBothBtn").hidden = !anyBaseSessions;
+    } else {
+      $("#emptyTitle").textContent = "No agent sessions running yet";
+      $("#emptyDesc").innerHTML = "Start an Antigravity (<code>agy</code>) or Claude Code (<code>claude</code>) session directly from here, or launch one in any terminal:";
+      $("#emptyCode").textContent = "tmux new -s feature-work\nagy --mode auto   # or: claude";
+      $("#emptyNewBtn").textContent = "Start a session";
+      $("#emptyShowBothBtn").hidden = true;
+    }
+  }
+
   function renderInspector() {
     const s = current();
     $("#empty").hidden = !!s;
     $("#pane").hidden = !s;
     if (!s) {
+      renderEmptyState();
       syncBrowserFrames(null);
       return;
     }
@@ -990,7 +1070,8 @@
     const agentChip = $("#pAgentChip");
     agentChip.hidden = !agentSummary;
     if (agentSummary) {
-      agentChip.className = `agent-chip ${s.agent_kind === "agy" ? "is-agy" : ""}`;
+      const chipKindCls = s.agent_kind === "agy" ? "is-agy" : s.agent_kind === "claude" ? "is-claude" : "";
+      agentChip.className = `agent-chip ${chipKindCls}`.trim();
       agentChip.textContent = agentSummary;
     }
 
@@ -1078,6 +1159,7 @@
     // Show interactive controls vs read-only Adopt banner
     $("#quick").hidden = !canKeys;
     $("#agySlashBar").hidden = s.agent_kind !== "agy" || !canKeys;
+    $("#claudeSlashBar").hidden = s.agent_kind !== "claude" || !canKeys;
     $("#cmdForm").hidden = readOnlyExt;
     $("#adoptBanner").hidden = !readOnlyExt;
     if (readOnlyExt) {
@@ -1172,10 +1254,12 @@
     $("#viewGridBtn").classList.toggle("active", viewMode === "grid");
 
     const list = visibleSessions();
-    if (!sel || !S.sessions.some(s => s.id === sel)) {
-      sel = list[0]?.id ?? S.sessions[0]?.id ?? null;
+    const scopedSessions = S.sessions.filter(s => passesBaseToggleFilter(s) && matchesAgentTab(s, agentFilter));
+    if (!sel || !scopedSessions.some(s => s.id === sel)) {
+      sel = list[0]?.id ?? scopedSessions[0]?.id ?? null;
       stick = true;
     }
+    renderAgentTabs();
     renderCounts();
     renderSidebar(list);
     renderEvents();
@@ -1279,6 +1363,11 @@
 
   function selectSession(id) {
     if (!id) return;
+    const targetSess = S.sessions.find(x => x.id === id);
+    if (targetSess && !matchesAgentTab(targetSess, agentFilter)) {
+      agentFilter = "both";
+      setPref("agentFilter", agentFilter);
+    }
     sel = id;
     stick = true;
     if (viewMode === "grid") {
@@ -1304,6 +1393,28 @@
   }
 
   // Topbar filters & view switches
+  function setAgentFilter(nextTab) {
+    if (!["both", "agy", "claude"].includes(nextTab)) return;
+    agentFilter = nextTab;
+    setPref("agentFilter", agentFilter);
+    if (statusFilter !== "all") {
+      const hasStatusMatch = S.sessions.some(
+        s => passesBaseToggleFilter(s) && matchesAgentTab(s, agentFilter) && s.status === statusFilter
+      );
+      if (!hasStatusMatch) statusFilter = "all";
+    }
+    render();
+    syncNeededOutputs();
+  }
+
+  $("#agentTabs").addEventListener("click", e => {
+    const btn = e.target.closest("button[data-agent-tab]");
+    if (!btn) return;
+    setAgentFilter(btn.dataset.agentTab);
+  });
+
+  $("#emptyShowBothBtn").onclick = () => setAgentFilter("both");
+
   $("#counts").addEventListener("click", e => {
     const btn = e.target.closest("button[data-filter]");
     if (!btn) return;
@@ -1468,7 +1579,7 @@
     if (sb && sel) {
       const cmdInput = $("#cmd");
       const slash = sb.dataset.slash;
-      if (slash === "/compact" || slash === "/learn") {
+      if (["/compact", "/learn", "/clear", "/cost", "/init", "/review"].includes(slash)) {
         sendAction(sel, { action: "send", text: slash, enter: true }, `Sent ${slash}`);
       } else {
         cmdInput.value = slash + " ";
@@ -1853,34 +1964,47 @@
 
   const dlg = $("#newDlg");
 
-  function syncAgyCommand() {
-    if (activePreset !== "agy") return;
-    const parts = ["agy"];
-    const mode = $("#agyMode").value;
-    const effort = $("#agyEffort").value;
-    if (mode) parts.push(`--mode ${mode}`);
-    if (effort) parts.push(`--effort ${effort}`);
-    if ($("#agyContinue").checked) parts.push("--continue");
-    if ($("#agySandbox").checked) parts.push("--sandbox");
-    $("#nCmd").value = parts.join(" ");
+  function syncPresetCommand() {
+    if (activePreset === "agy") {
+      const parts = ["agy"];
+      const mode = $("#agyMode").value;
+      const effort = $("#agyEffort").value;
+      if (mode) parts.push(`--mode ${mode}`);
+      if (effort) parts.push(`--effort ${effort}`);
+      if ($("#agyContinue").checked) parts.push("--continue");
+      if ($("#agySandbox").checked) parts.push("--sandbox");
+      $("#nCmd").value = parts.join(" ");
+    } else if (activePreset === "claude") {
+      const parts = ["claude"];
+      const pmode = $("#claudePermMode").value;
+      if (pmode === "skip") parts.push("--dangerously-skip-permissions");
+      else if (pmode) parts.push(`--permission-mode ${pmode}`);
+      if ($("#claudeContinue").checked) parts.push("--continue");
+      $("#nCmd").value = parts.join(" ");
+    }
+  }
+
+  function applyPresetTab(preset) {
+    activePreset = preset;
+    $$(".preset-tab").forEach(t => t.classList.toggle("active", t.dataset.preset === preset));
+    $("#agyBuilder").hidden = preset !== "agy";
+    $("#claudeBuilder").hidden = preset !== "claude";
+    if (preset === "custom") $("#nCmd").value = "";
+    else syncPresetCommand();
   }
 
   $$(".preset-tab").forEach(tab => {
-    tab.onclick = () => {
-      activePreset = tab.dataset.preset;
-      $$(".preset-tab").forEach(t => t.classList.toggle("active", t === tab));
-      $("#agyBuilder").hidden = activePreset !== "agy";
-      if (activePreset === "agy") syncAgyCommand();
-      else $("#nCmd").value = "";
-    };
+    tab.onclick = () => applyPresetTab(tab.dataset.preset);
   });
 
-  ["#agyMode", "#agyEffort", "#agyContinue", "#agySandbox"].forEach(selStr => {
-    $(selStr).addEventListener("change", syncAgyCommand);
+  ["#agyMode", "#agyEffort", "#agyContinue", "#agySandbox", "#claudePermMode", "#claudeContinue"].forEach(selStr => {
+    $(selStr).addEventListener("change", syncPresetCommand);
   });
 
   function openNewDialog() {
     $("#nErr").textContent = "";
+    if (agentFilter === "claude" && activePreset !== "claude") applyPresetTab("claude");
+    else if (agentFilter === "agy" && activePreset !== "agy") applyPresetTab("agy");
     const s = current();
     if (!$("#nCwd").value) {
       $("#nCwd").value = s ? shortPath(s.cwd) : (S.recent_cwds[0] ? shortPath(S.recent_cwds[0]) : "~");

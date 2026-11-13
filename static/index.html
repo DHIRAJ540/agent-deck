@@ -19,6 +19,23 @@
       <span>Agent Deck</span>
     </div>
 
+    <div class="agent-tabs" id="agentTabs" role="tablist" aria-label="Filter by AI agent">
+      <button class="agent-tab active" type="button" role="tab" data-agent-tab="both" aria-selected="true" title="Show both Antigravity (agy) and Claude terminals">
+        <span>Both</span>
+        <b class="agent-tab-count" id="agentCountBoth">0</b>
+      </button>
+      <button class="agent-tab tab-agy" type="button" role="tab" data-agent-tab="agy" aria-selected="false" title="Show Antigravity (agy) terminals">
+        <span class="agent-mark mark-agy" aria-hidden="true"></span>
+        <span>agy</span>
+        <b class="agent-tab-count" id="agentCountAgy">0</b>
+      </button>
+      <button class="agent-tab tab-claude" type="button" role="tab" data-agent-tab="claude" aria-selected="false" title="Show Claude Code terminals">
+        <span class="agent-mark mark-claude" aria-hidden="true"></span>
+        <span>Claude</span>
+        <b class="agent-tab-count" id="agentCountClaude">0</b>
+      </button>
+    </div>
+
     <div class="counts" id="counts" role="toolbar" aria-label="Filter sessions by status"></div>
 
     <div class="top-actions">
@@ -99,12 +116,13 @@
 
     <section class="inspector" id="detail">
       <div class="empty-state" id="empty">
-        <h2>No agent sessions running yet</h2>
-        <p>Start an Antigravity (<code>agy</code>) or CLI agent session directly from here, or launch one in any terminal:</p>
-        <pre class="empty-code">tmux new -s feature-work
+        <h2 id="emptyTitle">No agent sessions running yet</h2>
+        <p id="emptyDesc">Start an Antigravity (<code>agy</code>) or Claude Code (<code>claude</code>) session directly from here, or launch one in any terminal:</p>
+        <pre class="empty-code" id="emptyCode">tmux new -s feature-work
 agy --mode auto</pre>
         <div class="empty-actions">
-          <button class="btn primary" id="emptyNewBtn" type="button">Start an agy session</button>
+          <button class="btn primary" id="emptyNewBtn" type="button">Start a session</button>
+          <button class="btn" id="emptyShowBothBtn" type="button" hidden>Show Both (agy + Claude)</button>
           <button class="btn" id="emptyShowShellsBtn" type="button" hidden>Show open plain shells</button>
         </div>
       </div>
@@ -336,6 +354,15 @@ agy --mode auto</pre>
             <button class="btn slash-btn" type="button" data-slash="/grill-me">/grill-me</button>
             <button class="btn slash-btn" type="button" data-slash="/learn">/learn</button>
           </div>
+
+          <div class="slash-bar" id="claudeSlashBar" hidden>
+            <span class="bar-label">claude</span>
+            <button class="btn slash-btn is-claude" type="button" data-slash="/compact">/compact</button>
+            <button class="btn slash-btn is-claude" type="button" data-slash="/clear">/clear</button>
+            <button class="btn slash-btn is-claude" type="button" data-slash="/review">/review</button>
+            <button class="btn slash-btn is-claude" type="button" data-slash="/cost">/cost</button>
+            <button class="btn slash-btn is-claude" type="button" data-slash="/init">/init</button>
+          </div>
         </div>
 
         <div class="adopt-banner" id="adoptBanner" hidden>
@@ -379,6 +406,7 @@ agy --mode auto</pre>
 
       <div class="preset-tabs" role="tablist" aria-label="Agent preset">
         <button class="preset-tab active" type="button" data-preset="agy">Antigravity (agy)</button>
+        <button class="preset-tab" type="button" data-preset="claude">Claude Code</button>
         <button class="preset-tab" type="button" data-preset="custom">Custom / Shell</button>
       </div>
 
@@ -425,6 +453,21 @@ agy --mode auto</pre>
         <div class="builder-checks">
           <label class="check-ctl"><input type="checkbox" id="agyContinue"> <span>Resume latest (<code>--continue</code>)</span></label>
           <label class="check-ctl"><input type="checkbox" id="agySandbox"> <span>Sandbox (<code>--sandbox</code>)</span></label>
+        </div>
+      </div>
+
+      <div class="agy-builder" id="claudeBuilder" hidden>
+        <label class="field">
+          <span>Permission mode</span>
+          <select id="claudePermMode">
+            <option value="">Default</option>
+            <option value="acceptEdits">acceptEdits</option>
+            <option value="plan">plan</option>
+            <option value="skip">--dangerously-skip-permissions</option>
+          </select>
+        </label>
+        <div class="builder-checks">
+          <label class="check-ctl"><input type="checkbox" id="claudeContinue"> <span>Resume latest (<code>--continue</code>)</span></label>
         </div>
       </div>
 

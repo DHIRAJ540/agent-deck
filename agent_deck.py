@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 """
-Agent Deck v2.2: live multi-session dashboard & control deck for Antigravity (agy)
-and developer terminals — across tmux AND already-running macOS terminals.
+Agent Deck v2.7: live multi-session dashboard & local browser workspace for
+Antigravity (agy), Claude Code (claude), and developer terminals across tmux and macOS.
 
 Key capabilities
-  - Excludes Claude Code terminals automatically
-  - Discovers tmux panes, macOS Terminal.app / iTerm2 tabs, third-party TTYs
-    (Ghostty, Warp, VS Code, Cursor, Antigravity IDE), and live agy brain sessions
-  - Extracts terminal name, git branch, and live current task for every card
-  - One-click "Open Terminal" button to pop open / focus any session in macOS
-    Terminal or iTerm2 (attaching automatically for tmux sessions)
+  - Top-level filter tab to view Antigravity (agy), Claude Code, or Both side-by-side
+  - Discovers tmux panes, macOS Terminal.app / iTerm2 tabs, Ghostty surfaces, third-party TTYs
+    (Warp, VS Code, Cursor, Antigravity IDE), and live agy brain sessions
+  - Extracts terminal/conversation title, git branch, local dev server port, and current task
+  - Direct terminal reply & 1-click option/approval buttons across tmux, Ghostty, iTerm2 & Terminal.app
   - Full ANSI color rendering (16 / 256 / TrueColor), SSE live updates, zero pip deps
 """
 
@@ -67,14 +66,15 @@ DEV_SERVER_RE = re.compile(
 PORT_ARG_RE = re.compile(r"(?:--port|-p)(?:=|\s+)(\d{2,5})\b")
 ABS_PATH_TOKEN_RE = re.compile(r"((?:/Users/|/home/|/tmp/wt-)[^\s\"'`]+)")
 
-# Detect Claude Code processes so they can be excluded per user preference.
+# Detect Claude Code CLI processes (native binary, Homebrew, or npm package).
 CLAUDE_PROC_RE = re.compile(
-    r"(?:^|/|\s)claude(?:-code)?(?:\s|$)|@anthropic-ai/claude-code|/\.claude/",
+    r"(?:^|/|\s)claude(?:-code)?(?:\s|$)|@anthropic-ai/claude-code|/\.local/share/claude/versions/",
     re.IGNORECASE,
 )
 
 KNOWN_AGENTS = [
     ("agy", re.compile(r"(?:^|/)(?:agy|antigravity(?:-cli)?)(?:\s|$)", re.I)),
+    ("claude", CLAUDE_PROC_RE),
     ("codex", re.compile(r"(?:^|/)codex(?:\s|$)", re.I)),
     ("gemini", re.compile(r"(?:^|/)gemini(?:-cli)?(?:\s|$)", re.I)),
     ("aider", re.compile(r"(?:^|/)aider(?:\s|$)", re.I)),
@@ -113,6 +113,8 @@ INPUT_PATTERNS = [
     r"\[y/N\]",
     r"\byes/no\b",
     r"do you want to (?:proceed|continue|run|allow|edit|create|delete|execute)",
+    r"do you want to make this edit",
+    r"tell claude what to do",
     r"would you like to (?:proceed|continue|run|allow)",
     r"\ballow\b.*\?",
     r"\ballow once\b",
@@ -161,10 +163,12 @@ ERROR_PATTERNS = [
     r"\breauthentication failed\b",
 ]
 
-MENU_OPTION_RE = re.compile(r"^\s*(?:[❯>›➜\*]\s*)?([1-9])[\.\)]\s+(.{2,60}?)\s*$")
+MENU_OPTION_RE = re.compile(r"^\s*(?:[❯>›➜\*]\s*)?([1-9])[\.\)]\s+(.{2,120}?)\s*$")
 YN_RE = re.compile(r"(\[Y/n\]|\[y/N\]|\[y/n\]|\(y/n\)|\byes/no\b)", re.I)
 PROMPT_LINE_RE = re.compile(r"^\s*[❯›>]\s+(.{3,100}?)\s*$")
 SPINNER_LINE_RE = re.compile(r"^\s*[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏⣾⣽⣻⢿⡿⣟⣯⣷✻✽✶✢]\s+(.{3,90}?)\s*$")
+CLAUDE_SPINNER_CHARS = frozenset("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏⣾⣽⣻⢿⡿⣟⣯⣷✻✽✶✢⠐⠂⠄⠆⠇⠚⠒⠖⠦")
+CLAUDE_IDLE_CHARS = frozenset("✳•·")
 
 CHECK_DONE = re.compile(r"^[\s\-\*•⎿│└├]*(?:\[[xX]\]|☒|✔|✓|✅|◉|●)\s+\S")
 CHECK_TODO = re.compile(r"^[\s\-\*•⎿│└├]*(?:\[ \]|☐|◻|○|□|◯)\s+\S")
@@ -183,6 +187,8 @@ AGY_CLI_DIR = Path.home() / ".gemini" / "antigravity-cli"
 AGY_BRAIN_DIR = AGY_CLI_DIR / "brain"
 AGY_PRESENCE_DIR = AGY_CLI_DIR / "presence"
 AGY_SUMMARIES_DB = AGY_CLI_DIR / "conversation_summaries.db"
+CLAUDE_DIR = Path.home() / ".claude"
+CLAUDE_PROJECTS_DIR = CLAUDE_DIR / "projects"
 
 
 def _compile(patterns):
@@ -220,6 +226,7 @@ GHOSTTY_CACHE = {"ts": 0.0, "terminals": []}
 AGY_SUMMARY_CACHE = {"ts": 0.0, "data": {}}
 AGY_PRESENCE_CACHE = {"ts": 0.0, "pid_to_conv": {}, "active_convs": set()}
 AGY_TRANSCRIPT_CACHE = {}
+CLAUDE_TRANSCRIPT_CACHE = {}
 OSASCRIPT_BLOCKED = set()
 EVENTS = []
 LABELS = {}
@@ -234,7 +241,7 @@ KEY_OK = re.compile(
     r"^(Enter|Escape|C-c|C-d|C-l|C-r|C-u|C-z|Up|Down|Left|Right|"
     r"Tab|BTab|Space|BSpace|PageUp|PageDown|/[a-z-]+|[A-Za-z0-9])$"
 )
-SESSION_ID_OK = re.compile(r"^(%\d+|tty:[A-Za-z0-9_/-]+|agy:[A-Za-z0-9_-]+)$")
+SESSION_ID_OK = re.compile(r"^(%\d+|tty:[A-Za-z0-9_/-]+|agy:[A-Za-z0-9_-]+|claude:[A-Za-z0-9_-]+)$")
 SESSION_NAME_OK = re.compile(r"^[A-Za-z0-9_-]{1,40}$")
 
 
@@ -435,6 +442,20 @@ def parse_agent_meta(kind, args_str):
             meta["skip_perms"] = True
         if "--remote-agent" in args_str:
             meta["remote"] = True
+    elif kind == "claude":
+        mode = _extract_flag(args_str, "--permission-mode")
+        model = _extract_flag(args_str, "--model")
+        conv = _extract_flag(args_str, "--resume") or _extract_flag(args_str, "-r")
+        if mode:
+            meta["mode"] = mode
+        if model:
+            meta["model"] = model
+        if conv and not conv.startswith("-"):
+            meta["conversation"] = conv
+        if re.search(r"(?:^|\s)(?:--continue|-c)(?:\s|$)", args_str):
+            meta["resumed"] = True
+        if "--dangerously-skip-permissions" in args_str:
+            meta["skip_perms"] = True
     return meta
 
 
@@ -577,29 +598,14 @@ def _extract_dev_server_info(args_str):
 def inspect_lineage(lineage, dead=False, fallback_cmd="zsh", root_tty=None):
     """
     Analyzes a list of (pid, depth, comm, args[, proc_tty]) tuples.
-    Marks is_claude=True if Claude Code is running anywhere in the terminal lineage.
-    Separates background dev servers / daemon child PTYs from foreground subtools.
+    Identifies AI coding agents (Antigravity agy, Claude Code, Codex, Gemini, etc.)
+    and separates background dev servers / daemon child PTYs from foreground subtools.
     """
     target_pid = lineage[0][0] if lineage else 0
     norm = [
         (item[0], item[1], item[2], item[3], item[4] if len(item) > 4 else None)
         for item in lineage
     ]
-
-    for pid, depth, comm, args, _ptty in norm:
-        if CLAUDE_PROC_RE.search(f"{comm} {args}"):
-            return {
-                "is_claude": True,
-                "focus_pid": pid,
-                "agent_running": False,
-                "agent_kind": "claude",
-                "agent_cmd": "claude",
-                "agent_meta": {},
-                "subtool": None,
-                "subtool_cmd": None,
-                "dev_server": None,
-                "dev_cwd": None,
-            }
 
     found_agent = None
     agent_depth = -1
@@ -634,20 +640,22 @@ def inspect_lineage(lineage, dead=False, fallback_cmd="zsh", root_tty=None):
             if depth <= agent_depth:
                 continue
             base = c_comm.lower()
-            if base in SHELLS or base in WRAPPERS or base in {kind, "node"}:
+            if base in SHELLS or base in WRAPPERS or base in {kind, "node", "claude", "agy"}:
+                continue
+            if re.match(r"^\d+\.\d+\.\d+", base):
                 continue
             if base in DAEMON_SUBTOOLS or DAEMON_ARG_RE.search(c_args or ""):
                 continue
             if DEV_SERVER_RE.search(c_args or ""):
                 continue
-            # Background daemon spawned on a separate child PTY by agy
+            # Background daemon spawned on a separate child PTY by agy / claude
             if root_tty and c_tty and c_tty != "??" and c_tty != root_tty:
                 continue
             subtool = c_comm
             subtool_cmd = _shorten_cmd(c_args)
             break
         return {
-            "is_claude": False,
+            "is_claude": kind == "claude",
             "focus_pid": a_pid,
             "agent_running": not dead,
             "agent_kind": kind,
@@ -699,25 +707,13 @@ def inspect_pane_processes(pane, proc_snapshot):
     fallback_cmd = pane["cmd"]
     fallback_base = os.path.basename(fallback_cmd).lower()
 
-    if CLAUDE_PROC_RE.search(fallback_cmd) or CLAUDE_PROC_RE.search(pane.get("window_name", "")):
-        return {
-            "is_claude": True,
-            "agent_running": False,
-            "agent_kind": "claude",
-            "agent_cmd": "claude",
-            "agent_meta": {},
-            "subtool": None,
-            "subtool_cmd": None,
-            "dev_server": None,
-            "dev_cwd": None,
-        }
-
     if not proc_snapshot or not pane["pane_pid"]:
+        hay = f"{fallback_cmd} {pane.get('window_name', '')}"
         for kind, pat in KNOWN_AGENTS:
-            if pat.search(fallback_cmd):
+            if pat.search(hay):
                 return {
-                    "is_claude": False,
-                    "agent_running": True,
+                    "is_claude": kind == "claude",
+                    "agent_running": not pane["dead"],
                     "agent_kind": kind,
                     "agent_cmd": kind,
                     "agent_meta": {"kind": kind},
@@ -902,14 +898,37 @@ def macos_list_ghostty_terminals(now=None):
             gid, gname, gcwd = parts[0].strip(), parts[1].strip(), parts[2].strip().rstrip("/")
             if not gid:
                 continue
-            # Skip Claude Code surfaces (prefixed with ✳ or matching claude) and Agent Deck's own server tab
-            if gname.startswith("✳") or CLAUDE_PROC_RE.search(gname) or "agent_deck.py" in gname:
+            # Skip Agent Deck's own server tab
+            if "agent_deck.py" in gname:
                 continue
             terms.append({"id": gid, "name": gname, "cwd": gcwd})
 
     GHOSTTY_CACHE["ts"] = ts_now
     GHOSTTY_CACHE["terminals"] = terms
     return terms
+
+
+def _clean_claude_tab_title(raw_title):
+    """
+    Normalizes a Claude Code terminal title (e.g. '✳ Fix login redirect' or '⠐ Refactoring…').
+    Returns (clean_title, is_spinning, has_claude_marker).
+    """
+    t = (raw_title or "").strip()
+    if not t:
+        return "", False, False
+    first_ch = t[0]
+    is_spinning = first_ch in CLAUDE_SPINNER_CHARS
+    has_marker = is_spinning or (first_ch in CLAUDE_IDLE_CHARS) or bool(CLAUDE_PROC_RE.search(t))
+    i = 0
+    while i < len(t) and (t[i] in CLAUDE_SPINNER_CHARS or t[i] in CLAUDE_IDLE_CHARS or t[i].isspace()):
+        i += 1
+    cleaned = t[i:].strip()
+    if " — " in cleaned:
+        cleaned = cleaned.split(" — ")[0].strip()
+    cleaned = re.sub(r"\s*—\s*-?(?:zsh|bash|fish).*$", "", cleaned).strip()
+    if cleaned.lower() in {"claude", "claude code", "zsh", "bash", "fish", "-zsh", "-bash"}:
+        cleaned = ""
+    return cleaned, is_spinning, has_marker
 
 
 def match_ghostty_surfaces(records, ghostty_terms):
@@ -927,19 +946,35 @@ def match_ghostty_surfaces(records, ghostty_terms):
     def _norm_dir(p):
         return (p or "").rstrip("/")
 
-    # Pass 1: exact Antigravity conversation title match (`"<title> — <folder>"` or `"<title>"`)
+    def _is_claude_surface(gname):
+        _, _, has_marker = _clean_claude_tab_title(gname)
+        return has_marker
+
+    # Pass 1: exact Antigravity or Claude conversation title match
     for rec in records:
         ctitle = (rec.get("conv_title") or "").strip()
         if not ctitle:
             continue
+        rkind = rec.get("agent_kind") or ""
         rcwds = {_norm_dir(rec.get("launch_cwd")), _norm_dir(rec.get("cwd"))} - {""}
         candidates = []
         for g in ghostty_terms:
             if g["id"] in used_ids:
                 continue
             gname = g["name"]
+            g_is_claude = _is_claude_surface(gname)
+            if rkind == "agy" and g_is_claude:
+                continue
+            if rkind == "claude" and not g_is_claude and " — " in gname and not gname.lower().startswith("claude"):
+                continue
+            g_clean_claude, _, _ = _clean_claude_tab_title(gname)
             g_prefix = gname.split(" — ")[0].strip()
-            if gname == ctitle or g_prefix == ctitle or gname.startswith(ctitle + " — "):
+            if (
+                gname == ctitle
+                or g_prefix == ctitle
+                or gname.startswith(ctitle + " — ")
+                or (g_clean_claude and g_clean_claude == ctitle)
+            ):
                 cwd_score = 0 if (_norm_dir(g["cwd"]) in rcwds) else 1
                 candidates.append((cwd_score, g))
         if candidates:
@@ -948,21 +983,38 @@ def match_ghostty_surfaces(records, ghostty_terms):
             matched[rec["sid"]] = chosen
             used_ids.add(chosen["id"])
 
-    # Pass 2: non-shell foreground command title match in the same working directory
+    # Pass 2: agent-specific & non-shell foreground command match in the same working directory
     for rec in records:
         if rec["sid"] in matched:
             continue
+        rkind = (rec.get("agent_kind") or "").strip().lower()
         acmd = (rec.get("agent_cmd") or "").strip().lower()
         if not acmd or acmd in SHELLS:
             continue
-        lcwd = _norm_dir(rec.get("launch_cwd"))
+        rcwds = {_norm_dir(rec.get("launch_cwd")), _norm_dir(rec.get("cwd"))} - {""}
         for g in ghostty_terms:
             if g["id"] in used_ids:
                 continue
-            if acmd in g["name"].lower() and (not lcwd or _norm_dir(g["cwd"]) == lcwd):
-                matched[rec["sid"]] = g
-                used_ids.add(g["id"])
-                break
+            gname = g["name"]
+            gcwd = _norm_dir(g["cwd"])
+            cwd_ok = (not rcwds) or (gcwd in rcwds)
+            if rkind == "claude":
+                if _is_claude_surface(gname) and cwd_ok:
+                    matched[rec["sid"]] = g
+                    used_ids.add(g["id"])
+                    break
+            else:
+                if not _is_claude_surface(gname) and acmd in gname.lower() and cwd_ok:
+                    matched[rec["sid"]] = g
+                    used_ids.add(g["id"])
+                    break
+
+    # Pass 2b: if a single unmatched Claude TTY and a single unused Claude Ghostty surface remain, pair them
+    unmatched_claude = [r for r in records if r["sid"] not in matched and r.get("agent_kind") == "claude"]
+    unused_claude_g = [g for g in ghostty_terms if g["id"] not in used_ids and _is_claude_surface(g["name"])]
+    if len(unmatched_claude) == 1 and len(unused_claude_g) == 1:
+        matched[unmatched_claude[0]["sid"]] = unused_claude_g[0]
+        used_ids.add(unused_claude_g[0]["id"])
 
     # Pass 3: unambiguous working-directory match when counts align 1-to-1
     unmatched_by_cwd = {}
@@ -984,8 +1036,11 @@ def match_ghostty_surfaces(records, ghostty_terms):
     for lcwd, recs_in_dir in unmatched_by_cwd.items():
         g_in_dir = unused_by_cwd.get(lcwd) or []
         if len(recs_in_dir) == 1 and len(g_in_dir) == 1:
-            matched[recs_in_dir[0]["sid"]] = g_in_dir[0]
-            used_ids.add(g_in_dir[0]["id"])
+            rec0, g0 = recs_in_dir[0], g_in_dir[0]
+            if rec0.get("agent_kind") == "agy" and _is_claude_surface(g0["name"]):
+                continue
+            matched[rec0["sid"]] = g0
+            used_ids.add(g0["id"])
 
     return matched
 
@@ -1887,6 +1942,329 @@ def _classify_agy_from_metadata(summary_row, t_entry, info, now):
     return ("working" if subtool else "idle"), subtool
 
 
+def _clean_claude_user_text(raw_text):
+    txt = (raw_text or "").strip()
+    if not txt:
+        return ""
+    if "<command-message>" in txt or "<local-command" in txt or txt.startswith("<system-reminder>"):
+        cm = re.search(r"<command-name>\s*(/[^\s<]+)\s*</command-name>", txt)
+        return cm.group(1) if cm else ""
+    txt = re.sub(r"<system-reminder>.*?</system-reminder>", "", txt, flags=re.DOTALL).strip()
+    if txt.startswith("[Request interrupted"):
+        return ""
+    return txt
+
+
+def _find_claude_transcript_path(launch_cwd, conv_id="", claimed_ids=None, now=None):
+    if not CLAUDE_PROJECTS_DIR.is_dir():
+        return None
+    ts_now = now if now is not None else time.time()
+
+    if conv_id:
+        if launch_cwd:
+            for slug in (re.sub(r"[^A-Za-z0-9-]", "-", launch_cwd), launch_cwd.replace("/", "-")):
+                cand = CLAUDE_PROJECTS_DIR / slug / f"{conv_id}.jsonl"
+                if cand.is_file():
+                    return cand
+        try:
+            for pdir in CLAUDE_PROJECTS_DIR.iterdir():
+                if pdir.is_dir():
+                    cand = pdir / f"{conv_id}.jsonl"
+                    if cand.is_file():
+                        return cand
+        except OSError:
+            return None
+        return None
+
+    if not launch_cwd:
+        return None
+
+    seen_dirs = set()
+    candidates = []
+    for slug in (re.sub(r"[^A-Za-z0-9-]", "-", launch_cwd), launch_cwd.replace("/", "-")):
+        pdir = CLAUDE_PROJECTS_DIR / slug
+        if pdir in seen_dirs or not pdir.is_dir():
+            continue
+        seen_dirs.add(pdir)
+        try:
+            for jf in pdir.iterdir():
+                if not jf.name.endswith(".jsonl") or jf.name.startswith("agent-"):
+                    continue
+                stem = jf.stem
+                if claimed_ids and stem in claimed_ids:
+                    continue
+                st = jf.stat()
+                if ts_now - st.st_mtime <= 86400:
+                    candidates.append((st.st_mtime, jf))
+        except OSError:
+            continue
+
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    return candidates[0][1]
+
+
+def _read_claude_transcript(jpath):
+    if not jpath:
+        return None
+    try:
+        st = jpath.stat()
+    except OSError:
+        return None
+
+    key = str(jpath)
+    cached = CLAUDE_TRANSCRIPT_CACHE.get(key)
+    if cached and cached["mtime"] == st.st_mtime and cached["size"] == st.st_size:
+        return cached
+
+    try:
+        with open(jpath, "rb") as f:
+            head_raw = f.read(8192).decode("utf-8", "replace")
+            if st.st_size > 8192:
+                f.seek(max(0, st.st_size - 56000))
+                tail_raw = f.read().decode("utf-8", "replace")
+            else:
+                tail_raw = head_raw
+    except OSError:
+        return None
+
+    head_objs = []
+    for ln in head_raw.splitlines()[:14]:
+        try:
+            head_objs.append(json.loads(ln))
+        except ValueError:
+            pass
+
+    tail_objs = []
+    for ln in tail_raw.splitlines()[1 if st.st_size > 8192 else 0:]:
+        try:
+            tail_objs.append(json.loads(ln))
+        except ValueError:
+            pass
+
+    if not head_objs and not tail_objs:
+        return None
+
+    summary_title = ""
+    first_user_title = ""
+    detected_cwd = ""
+    for obj in head_objs + tail_objs:
+        if not isinstance(obj, dict):
+            continue
+        ocwd = obj.get("cwd")
+        if isinstance(ocwd, str) and ocwd.startswith("/") and os.path.isdir(ocwd):
+            detected_cwd = ocwd
+        if obj.get("type") == "summary" and obj.get("summary"):
+            summary_title = str(obj["summary"]).strip()
+        elif obj.get("customTitle"):
+            summary_title = str(obj["customTitle"]).strip()
+        elif not first_user_title and obj.get("type") == "user":
+            msg = obj.get("message") or {}
+            content = msg.get("content")
+            raw_u = ""
+            if isinstance(content, str):
+                raw_u = content
+            elif isinstance(content, list):
+                for blk in content:
+                    if isinstance(blk, dict) and blk.get("type") == "text":
+                        raw_u = blk.get("text") or ""
+                        break
+            cleaned_u = _clean_claude_user_text(raw_u)
+            if cleaned_u and not cleaned_u.startswith("/"):
+                first_ln = next((l.strip() for l in cleaned_u.splitlines() if l.strip()), "")
+                if first_ln and first_ln.lower() not in {"hi", "hello", "hey", "ok", "yes", "continue"}:
+                    first_user_title = first_ln[:64]
+
+    pending_tools = []
+    turns = []
+    latest_task = ""
+    last_conv_role = ""
+    last_user_ts = None
+
+    for obj in tail_objs[-45:]:
+        if not isinstance(obj, dict):
+            continue
+        otype = obj.get("type")
+        msg = obj.get("message") if isinstance(obj.get("message"), dict) else {}
+        content = msg.get("content")
+
+        if otype == "user":
+            ts_val = _parse_iso_ts(obj.get("timestamp"))
+            if isinstance(content, str):
+                utxt = _clean_claude_user_text(content)
+                if utxt:
+                    pending_tools.clear()
+                    last_conv_role = "user"
+                    if ts_val:
+                        last_user_ts = ts_val
+                    first_ln = next((l.strip() for l in utxt.splitlines() if l.strip()), "")
+                    if first_ln:
+                        latest_task = first_ln[:88]
+                    turns.append(("user", utxt))
+            elif isinstance(content, list):
+                answered = {
+                    blk.get("tool_use_id")
+                    for blk in content
+                    if isinstance(blk, dict) and blk.get("type") == "tool_result"
+                }
+                if answered:
+                    pending_tools = [t for t in pending_tools if t.get("id") not in answered]
+                for blk in content:
+                    if isinstance(blk, dict) and blk.get("type") == "text":
+                        utxt = _clean_claude_user_text(blk.get("text") or "")
+                        if utxt:
+                            pending_tools.clear()
+                            last_conv_role = "user"
+                            if ts_val:
+                                last_user_ts = ts_val
+                            first_ln = next((l.strip() for l in utxt.splitlines() if l.strip()), "")
+                            if first_ln:
+                                latest_task = first_ln[:88]
+                            turns.append(("user", utxt))
+        elif otype == "assistant" and isinstance(content, list):
+            last_conv_role = "assistant"
+            for blk in content:
+                if not isinstance(blk, dict):
+                    continue
+                btype = blk.get("type")
+                if btype == "tool_use":
+                    tname = str(blk.get("name") or "tool")
+                    tinp = blk.get("input") if isinstance(blk.get("input"), dict) else {}
+                    pending_tools.append({"id": blk.get("id"), "name": tname, "input": tinp})
+                    tsum = str(
+                        tinp.get("description")
+                        or tinp.get("command")
+                        or tinp.get("file_path")
+                        or tinp.get("pattern")
+                        or ""
+                    ).strip()
+                    if tsum:
+                        short_s = os.path.basename(tsum) if tsum.startswith("/") and " " not in tsum else _shorten_cmd(tsum, 72)
+                        latest_task = f"{tname}: {short_s}"[:88]
+                    turns.append(("tool", tname, tsum[:90]))
+                elif btype == "text":
+                    atxt = str(blk.get("text") or "").strip()
+                    if atxt:
+                        turns.append(("assistant", atxt))
+
+    entry = {
+        "session_id": jpath.stem,
+        "mtime": st.st_mtime,
+        "size": st.st_size,
+        "title": summary_title or first_user_title,
+        "cwd": detected_cwd,
+        "latest_task": latest_task,
+        "turns": turns[-26:],
+        "pending_tools": pending_tools,
+        "last_role": last_conv_role,
+        "last_user_ts": last_user_ts,
+    }
+    CLAUDE_TRANSCRIPT_CACHE[key] = entry
+    return entry
+
+
+def extract_claude_pending_action(c_entry, info, now, tab_spinning=False):
+    if not c_entry or not c_entry.get("pending_tools"):
+        return None
+    age = now - c_entry["mtime"]
+    if age > 7200:
+        return None
+
+    for tc in c_entry["pending_tools"]:
+        if tc.get("name") != "AskUserQuestion":
+            continue
+        tinp = tc.get("input") or {}
+        q_list = tinp.get("questions") if isinstance(tinp.get("questions"), list) else []
+        if not q_list:
+            continue
+        q0 = q_list[0] if isinstance(q_list[0], dict) else {}
+        q_text = str(q0.get("question") or "Select an option").strip()
+        multi = bool(q0.get("multiSelect"))
+        raw_opts = q0.get("options") if isinstance(q0.get("options"), list) else []
+        choices = []
+        for idx, opt in enumerate(raw_opts[:6], start=1):
+            lbl_raw = opt.get("label") if isinstance(opt, dict) else str(opt or "")
+            desc_raw = opt.get("description") if isinstance(opt, dict) else ""
+            lbl_clean = re.sub(r"\s+", " ", str(lbl_raw or "")).strip()
+            if not lbl_clean:
+                continue
+            short_l = lbl_clean if len(lbl_clean) <= 42 else lbl_clean[:41] + "…"
+            tip = f"{idx}. {lbl_clean}" + (f" — {desc_raw}" if desc_raw else "")
+            choices.append({
+                "type": "keys",
+                "keys": [str(idx)],
+                "label": f"{idx}. {short_l}",
+                "tooltip": tip[:160],
+                "style": "primary" if (idx == 1 and not multi) else "",
+            })
+        if multi:
+            choices.append({"type": "keys", "keys": ["Enter"], "label": "Submit (Enter)", "style": "primary"})
+        choices.append({"type": "keys", "keys": ["Escape"], "label": "Cancel (Esc)", "style": "subtle"})
+        return {
+            "kind": "question",
+            "title": q_text[:140],
+            "detail": "Select all that apply, then press Submit." if multi else "",
+            "choices": choices,
+        }
+
+    if info.get("subtool") or tab_spinning or (info.get("agent_meta") or {}).get("skip_perms") or age < 2.5:
+        return None
+
+    tc = c_entry["pending_tools"][-1]
+    tname = tc.get("name") or ""
+    if tname not in ("Bash", "Edit", "MultiEdit", "Write", "NotebookEdit") and not tname.startswith("mcp__"):
+        return None
+    tinp = tc.get("input") or {}
+    if tname == "Bash":
+        cmd_line = str(tinp.get("command") or "").strip()
+        desc = str(tinp.get("description") or "").strip()
+        title = f"Approve Bash: {desc or _shorten_cmd(cmd_line, 56) or 'shell command'}"
+        detail = cmd_line[:180]
+    else:
+        fpath = str(tinp.get("file_path") or tinp.get("notebook_path") or "").strip()
+        short_f = os.path.basename(fpath.rstrip("/")) if fpath.startswith("/") else fpath[:56]
+        title = f"Approve {tname}{f': {short_f}' if short_f else ''}"
+        detail = fpath[:180] if fpath != short_f else ""
+
+    return {
+        "kind": "approval",
+        "title": title[:140],
+        "detail": detail,
+        "choices": [
+            {"type": "keys", "keys": ["1"], "label": "1. Yes", "tooltip": "Approve once", "style": "primary"},
+            {"type": "keys", "keys": ["2"], "label": "2. Yes, allow similar", "tooltip": "Approve and remember for session", "style": ""},
+            {"type": "keys", "keys": ["Escape"], "label": "No (Esc)", "tooltip": "Reject / cancel action", "style": "danger"},
+        ],
+    }
+
+
+def _render_claude_transcript(conv_id, c_entry, cwd, header_prefix="Claude Code Session", title="", pending_action=None):
+    title_str = f" — {title}" if title else ""
+    lines = [
+        f"\x1b[1;33m{header_prefix}{title_str}\x1b[0m  \x1b[2m({conv_id[:12]})\x1b[0m",
+        f"\x1b[2mWorkspace: {cwd}\x1b[0m",
+        "\x1b[2m" + ("─" * 68) + "\x1b[0m",
+    ]
+    for item in (c_entry.get("turns") or [])[-22:]:
+        kind = item[0]
+        if kind == "user":
+            utxt = item[1]
+            short_u = utxt if len(utxt) <= 600 else utxt[:600] + " …"
+            lines.append(f"\n\x1b[1;32m❯ User\x1b[0m\n{short_u}")
+        elif kind == "tool":
+            lines.append(f"\x1b[33m  ⚙ {item[1]}\x1b[0m \x1b[2m{item[2]}\x1b[0m")
+        elif kind == "assistant":
+            lines.append(f"\n\x1b[1;35m◆ Claude\x1b[0m\n{item[1]}")
+    if pending_action:
+        lines.append("\n\x1b[1;33m● Action Needed — " + pending_action["title"] + "\x1b[0m")
+        if pending_action.get("detail"):
+            lines.append(f"\x1b[2m  {pending_action['detail']}\x1b[0m")
+        for ch in pending_action.get("choices") or []:
+            lines.append(f"  \x1b[36m[{ch['label']}]\x1b[0m")
+    return "\n".join(lines)
+
+
 def discover_external_ttys(proc_snapshot, now):
     if not proc_snapshot:
         return [], set()
@@ -1965,9 +2343,6 @@ def discover_external_ttys(proc_snapshot, now):
             continue
 
         info = inspect_lineage(lineage, dead=False, fallback_cmd=procs[root_pid]["comm"], root_tty=tty)
-        # Exclude Claude Code terminals completely
-        if info.get("is_claude"):
-            continue
 
         root_comm = procs[root_pid]["comm"].lower()
         if not info["agent_running"] and root_comm not in SHELLS:
@@ -1980,6 +2355,7 @@ def discover_external_ttys(proc_snapshot, now):
     cwd_map = batch_lsof_cwds(pids_for_cwd)
     results = []
     seen_convs = set()
+    claimed_claude_ids = set()
 
     prepared = []
     ghostty_candidates = []
@@ -2002,12 +2378,28 @@ def discover_external_ttys(proc_snapshot, now):
             if conv_id:
                 info["agent_meta"] = dict(info["agent_meta"] or {}, conversation=conv_id)
 
-        if conv_id:
+        if conv_id and info["agent_kind"] == "agy":
             seen_convs.add(conv_id)
 
-        summary_row = summaries.get(conv_id) if conv_id else None
+        summary_row = summaries.get(conv_id) if (conv_id and info["agent_kind"] == "agy") else None
         conv_title = (summary_row or {}).get("title", "")
-        t_entry = _read_agy_transcript_steps(conv_id) if conv_id else None
+        t_entry = _read_agy_transcript_steps(conv_id) if (conv_id and info["agent_kind"] == "agy") else None
+
+        c_entry = None
+        if info["agent_kind"] == "claude":
+            c_path = _find_claude_transcript_path(
+                launch_cwd,
+                conv_id=conv_id or "",
+                claimed_ids=claimed_claude_ids,
+                now=now,
+            )
+            c_entry = _read_claude_transcript(c_path) if c_path else None
+            if c_entry:
+                conv_id = c_entry["session_id"]
+                claimed_claude_ids.add(conv_id)
+                info["agent_meta"] = dict(info["agent_meta"] or {}, conversation=conv_id)
+                if c_entry.get("title"):
+                    conv_title = c_entry["title"]
 
         if t_entry:
             cwd = _extract_cwd_from_steps(
@@ -2015,6 +2407,8 @@ def discover_external_ttys(proc_snapshot, now):
                 fallback_cwd=launch_cwd,
                 dev_cwd=info.get("dev_cwd") or "",
             )
+        elif c_entry and c_entry.get("cwd"):
+            cwd = _nearest_git_root(c_entry["cwd"]) or c_entry["cwd"]
         elif info.get("dev_cwd"):
             cwd = info["dev_cwd"]
 
@@ -2031,6 +2425,7 @@ def discover_external_ttys(proc_snapshot, now):
             "summary_row": summary_row,
             "conv_title": conv_title,
             "t_entry": t_entry,
+            "c_entry": c_entry,
             "agent_cmd": info["agent_cmd"],
             "agent_kind": info["agent_kind"],
         }
@@ -2056,6 +2451,7 @@ def discover_external_ttys(proc_snapshot, now):
         summary_row = rec["summary_row"]
         conv_title = rec["conv_title"]
         t_entry = rec["t_entry"]
+        c_entry = rec["c_entry"]
         dev_tty = f"/dev/{tty}"
 
         g_surf = ghostty_map.get(sid)
@@ -2066,9 +2462,22 @@ def discover_external_ttys(proc_snapshot, now):
         if not tab_title and g_surf:
             tab_title = g_surf.get("name") or ""
 
+        claude_tab_title, claude_tab_spinning, _ = (
+            _clean_claude_tab_title(tab_title)
+            if info["agent_kind"] == "claude"
+            else ("", False, False)
+        )
+        if info["agent_kind"] == "claude" and claude_tab_title and not conv_title:
+            conv_title = claude_tab_title
+
         agy_action = (
             extract_agy_pending_action(summary_row, t_entry)
             if info["agent_kind"] == "agy" and (summary_row or t_entry)
+            else None
+        )
+        claude_action = (
+            extract_claude_pending_action(c_entry, info, now, tab_spinning=claude_tab_spinning)
+            if info["agent_kind"] == "claude" and c_entry
             else None
         )
 
@@ -2083,6 +2492,16 @@ def discover_external_ttys(proc_snapshot, now):
                 header_prefix=f"{host_app} · {tty}",
                 title=conv_title,
                 pending_action=agy_action,
+            )
+            plain_text = strip_ansi(ansi_text)
+        elif c_entry:
+            ansi_text = _render_claude_transcript(
+                conv_id or tty,
+                c_entry,
+                cwd,
+                header_prefix=f"{host_app} · {tty}",
+                title=conv_title,
+                pending_action=claude_action,
             )
             plain_text = strip_ansi(ansi_text)
         else:
@@ -2110,9 +2529,16 @@ def discover_external_ttys(proc_snapshot, now):
             or procs.get(root_pid, {}).get("started_at")
         )
         summary_mod_ts = (summary_row or {}).get("last_modified_ts")
-        summary_input_ts = (summary_row or {}).get("last_user_input_ts")
+        summary_input_ts = (summary_row or {}).get("last_user_input_ts") or (c_entry.get("last_user_ts") if c_entry else None)
         known_activity_ts = max(
-            [ts for ts in (t_entry["mtime"] if t_entry else None, summary_mod_ts) if ts],
+            [
+                ts for ts in (
+                    t_entry["mtime"] if t_entry else None,
+                    c_entry["mtime"] if c_entry else None,
+                    summary_mod_ts,
+                )
+                if ts
+            ],
             default=None,
         )
 
@@ -2146,10 +2572,11 @@ def discover_external_ttys(proc_snapshot, now):
         if raw_screen:
             fake_p = {"dead": False}
             status, choices = classify(fake_p, plain_text, info, tr, now)
-            if agy_action and status != "working":
+            ext_action = agy_action or claude_action
+            if ext_action and status != "working":
                 status = "needs_input"
-                pending_action = agy_action
-                choices = agy_action["choices"]
+                pending_action = ext_action
+                choices = ext_action["choices"]
             elif status == "needs_input":
                 pending_action = extract_screen_pending_action(plain_text, choices)
                 choices = pending_action["choices"]
@@ -2172,6 +2599,20 @@ def discover_external_ttys(proc_snapshot, now):
                 choices = pending_action["choices"]
             else:
                 choices = []
+        elif info["agent_kind"] == "claude":
+            if claude_action:
+                status = "needs_input"
+                pending_action = claude_action
+                choices = claude_action["choices"]
+            elif info.get("subtool") or claude_tab_spinning or (c_entry and (now - c_entry["mtime"]) < 3.0):
+                status = "working"
+                choices = []
+            elif c_entry and (now - c_entry["mtime"]) < 1800 and c_entry.get("last_role") == "assistant" and not c_entry.get("pending_tools"):
+                status = "done"
+                choices = []
+            else:
+                status = "idle"
+                choices = []
         else:
             if info["agent_running"]:
                 status = "working" if info.get("subtool") else "idle"
@@ -2191,7 +2632,7 @@ def discover_external_ttys(proc_snapshot, now):
         tr["status"] = status
         git_info = get_git_info(cwd, now)
         folder_name = os.path.basename(cwd.rstrip("/")) or tty
-        clean_tab = re.sub(r"\s*—\s*-?(?:zsh|bash|fish).*$", "", tab_title or "").strip()
+        clean_tab = claude_tab_title if info["agent_kind"] == "claude" else re.sub(r"\s*—\s*-?(?:zsh|bash|fish).*$", "", tab_title or "").strip()
         if conv_title:
             terminal_name = conv_title
         elif clean_tab:
@@ -2209,17 +2650,26 @@ def discover_external_ttys(proc_snapshot, now):
                 current_task = f"Running: {info['subtool_cmd']}"
             else:
                 current_task = _extract_agy_task(t_entry["tail"], label="", summary_title=conv_title)
+        elif c_entry and not raw_screen:
+            if label_val:
+                current_task = label_val
+            elif info.get("subtool_cmd"):
+                current_task = f"Running: {info['subtool_cmd']}"
+            else:
+                current_task = c_entry.get("latest_task") or conv_title or "Claude Code ready at prompt"
         else:
             current_task = infer_current_task(plain_text, info, status, label=label_val)
 
         ticket_match = None
-        if raw_screen or t_entry:
+        if raw_screen or t_entry or c_entry:
             for m in TICKET_RE.finditer("\n".join(non_empty_tail(plain_text, 30))):
                 ticket_match = m.group(1)
 
         adopt_cmd = ""
         if info["agent_kind"] == "agy":
             adopt_cmd = f"agy --conversation {conv_id}" if conv_id else "agy --continue"
+        elif info["agent_kind"] == "claude":
+            adopt_cmd = f"claude --resume {conv_id}" if conv_id else "claude --continue"
 
         if can_script and host_app == "iTerm2":
             backend = "iterm2"
@@ -2736,12 +3186,25 @@ def extract_prompt_choices(lines):
     for line in recent:
         m = MENU_OPTION_RE.match(line)
         if m:
-            num, label = m.group(1), m.group(2).strip()
-            if num not in seen_nums and len(label) <= 48:
+            num, label = m.group(1), re.sub(r"\s+", " ", m.group(2)).strip()
+            if num not in seen_nums and len(label) <= 115:
                 seen_nums.add(num)
-                menu.append({"type": "keys", "keys": [num], "label": f"{num}. {label}"})
+                short_lbl = label if len(label) <= 42 else label[:41] + "…"
+                low_lbl = label.lower()
+                style = ""
+                if num == "1" and low_lbl.startswith(("yes", "allow", "proceed", "approve")):
+                    style = "primary"
+                elif low_lbl.startswith(("no", "deny", "reject", "cancel")):
+                    style = "danger"
+                menu.append({
+                    "type": "keys",
+                    "keys": [num],
+                    "label": f"{num}. {short_lbl}",
+                    "tooltip": f"{num}. {label}",
+                    "style": style,
+                })
     if len(menu) >= 2:
-        return menu[:4]
+        return menu[:5]
 
     joined = "\n".join(recent[-6:])
     if YN_RE.search(joined):
@@ -2895,9 +3358,6 @@ def refresh(force_external=False):
 
     for p in panes:
         proc_info = inspect_pane_processes(p, proc_snapshot)
-        # Skip Claude Code terminals completely
-        if proc_info.get("is_claude"):
-            continue
 
         seen.add(p["id"])
         ansi_text = capture_ansi(p["id"], 280)
@@ -2937,12 +3397,12 @@ def refresh(force_external=False):
             conv = pid_to_conv.get(proc_info["focus_pid"])
             if conv:
                 proc_info["agent_meta"] = dict(proc_info.get("agent_meta") or {}, conversation=conv)
-        if conv:
+        if conv and proc_info.get("agent_kind") == "agy":
             tmux_convs.add(conv)
 
-        summary_row = summaries.get(conv) if conv else None
+        summary_row = summaries.get(conv) if (conv and proc_info.get("agent_kind") == "agy") else None
         conv_title = (summary_row or {}).get("title", "")
-        t_entry = _read_agy_transcript_steps(conv) if conv else None
+        t_entry = _read_agy_transcript_steps(conv) if (conv and proc_info.get("agent_kind") == "agy") else None
 
         eff_cwd = p["cwd"]
         if t_entry:
@@ -3027,12 +3487,16 @@ def refresh(force_external=False):
             current_task = infer_current_task(plain_text, proc_info, status, label=label_val)
 
         wname = p["window_name"]
+        pane_title_clean = ""
+        if proc_info.get("agent_kind") == "claude" and p.get("pane_title"):
+            pane_title_clean, _, _ = _clean_claude_tab_title(p["pane_title"])
+        effective_title = conv_title or pane_title_clean
         base_tmux_name = (
             f"{p['session']} / {wname}"
             if wname and wname not in SHELLS and wname != p["session"] and wname != (tr.get("agent_cmd") or "")
             else p["session"]
         )
-        term_name = f"{conv_title} · {base_tmux_name}" if conv_title else base_tmux_name
+        term_name = f"{effective_title} · {base_tmux_name}" if effective_title else base_tmux_name
         folder_name = os.path.basename(eff_cwd.rstrip("/")) or p["session"]
 
         sessions.append({
@@ -3043,7 +3507,7 @@ def refresh(force_external=False):
             "can_keys": True,
             "host_app": "tmux",
             "conversation_id": conv,
-            "conversation_title": conv_title,
+            "conversation_title": effective_title,
             "folder_name": folder_name,
             "dev_server": proc_info.get("dev_server"),
             "_lineage_pids": proc_info.get("lineage_pids") or [],
@@ -3211,7 +3675,7 @@ def do_adopt_into_tmux(sess):
         cwd = HOME
     folder = os.path.basename(cwd.rstrip("/")) or "term"
     kind = sess.get("agent_kind")
-    prefix = f"{kind}-{folder}" if kind in ("agy", "codex", "gemini") else folder
+    prefix = f"{kind}-{folder}" if kind in ("agy", "claude", "codex", "gemini") else folder
     name = _unique_tmux_name(prefix)
     cmd = sess.get("adopt_cmd") or ""
 
@@ -3599,8 +4063,6 @@ def do_new(body):
         return 400, {"ok": False, "error": "Use letters, numbers, - or _ for the session name (40 max)."}
     if not os.path.isdir(cwd):
         return 400, {"ok": False, "error": f"Folder not found: {cwd}"}
-    if CLAUDE_PROC_RE.search(command):
-        return 400, {"ok": False, "error": "Claude terminals are disabled in Agent Deck."}
     if tmux("has-session", "-t", f"={name}").returncode == 0:
         return 400, {"ok": False, "error": f"A session named '{name}' already exists."}
 
@@ -3969,7 +4431,7 @@ def main():
 
     host_label = "localhost" if IPV6_READY else "127.0.0.1"
     url = f"http://{host_label}:{port}/?token={TOKEN}"
-    print("\n  Agent Deck v2.5 is running.")
+    print("\n  Agent Deck v2.7 is running.")
     print(f"  Open:  {url}")
     print("  Press Ctrl+C to stop.\n")
 

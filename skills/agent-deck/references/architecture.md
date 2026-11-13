@@ -2,25 +2,24 @@
 
 ## File Layout
 
-- [`scripts/agent_deck.py`](../scripts/agent_deck.py): Single-file Python 3 stdlib HTTP + SSE server, process-tree scanner, Antigravity metadata reader, TCP port mapper, and managed dev-server launcher.
-- [`scripts/static/index.html`](../scripts/static/index.html): Workspace shell with resizable left session sidebar (`#sidebar`, `#sidebarResizer`), right-hand live browser & terminal inspector (`#detail`), multi-session grid wall (`#gridWall`), and `New session` dialog (`#newDlg`).
-- [`scripts/static/styles.css`](../scripts/static/styles.css): Light/dark/system theme tokens (`IBM Plex Sans` + `IBM Plex Mono`), card layout, browser toolbar & viewport frame rules, and ANSI 16/256/TrueColor classes.
-- [`scripts/static/app.js`](../scripts/static/app.js): SSE live stream client, persistent per-session `<iframe>` pool (`browserFramePool`), URL/port switcher, ANSI-to-HTML renderer, and keyboard shortcuts (`j`/`k`, `1`–`9`, `r` reload, `b` browser/logs, `v` grid, `n` new).
+- [`scripts/agent_deck.py`](../scripts/agent_deck.py): Single-file Python 3 stdlib HTTP + SSE server, process-tree scanner, Antigravity & Claude Code metadata reader, TCP port mapper, and managed dev-server launcher.
+- [`scripts/static/index.html`](../scripts/static/index.html): Workspace shell with top agent selector tabs (`#agentTabs`: `Both` | `agy` | `Claude`), resizable left session sidebar (`#sidebar`, `#sidebarResizer`), right-hand live browser & terminal inspector (`#detail`), multi-session grid wall (`#gridWall`), and `New session` dialog (`#newDlg`).
+- [`scripts/static/styles.css`](../scripts/static/styles.css): Light/dark/system theme tokens (`IBM Plex Sans` + `IBM Plex Mono`), agent selector tabs, card layout, browser toolbar & viewport frame rules, and ANSI 16/256/TrueColor classes.
+- [`scripts/static/app.js`](../scripts/static/app.js): SSE live stream client, persisted `agentFilter` (`both` / `agy` / `claude`), persistent per-session `<iframe>` pool (`browserFramePool`), URL/port switcher, ANSI-to-HTML renderer, and keyboard shortcuts (`j`/`k`, `1`–`9`, `r` reload, `b` browser/logs, `i` reply, `v` grid, `n` new).
 - [`scripts/start_agent_deck.sh`](../scripts/start_agent_deck.sh): Idempotent start/status/stop/install wrapper storing PID and startup log in `~/.agent-deck/`.
 
 ## Discovery & Metadata Pipeline (`agent_deck.py`)
 
 1. **Process Snapshot (`scan_process_table`):**
    - Executes `ps -axo pid=,ppid=,tty=,etime=,args=` to capture process hierarchy, controlling TTYs, and exact elapsed uptime (`agent_since_exact`).
-   - Excludes Agent Deck's own PID tree (`self_pids`) and any terminal running Claude Code (`CLAUDE_PROC_RE`).
+   - Classifies known agent CLIs (`KNOWN_AGENTS`: `agy` and `claude`, including `~/.local/share/claude/versions/*`) while excluding Agent Deck's own PID tree (`self_pids`).
    - Skips child sub-PTYs spawned under an ancestor PID that already owns another TTY so background tasks do not create duplicate cards.
    - Ignores background editor daemons (`DAEMON_SUBTOOLS` such as `esbuild --ping`, `tsserver`, `watchman`, `gitstatusd`) when determining foreground tasks.
 
-2. **Antigravity (`agy`) Linking & Pending Action Extraction (`get_agy_presence`, `get_agy_summaries`, `extract_agy_pending_action`):**
-   - Matches `agy` PIDs against `~/.gemini/antigravity-cli/presence/*.lock` to resolve `conversation_id`.
-   - Reads `~/.gemini/antigravity-cli/conversation_summaries.db` (read-only SQLite URI) for renamed conversation titles, active run/wait status (`CASCADE_RUN_STATUS_RUNNING`, `CASCADE_RUN_STATUS_WAITING`), and `last_modified_time` / `last_user_input_time`.
-   - Reads the tail of `~/.gemini/antigravity-cli/brain/<conv_id>/.system_generated/logs/transcript.jsonl` to infer the active git worktree (`_extract_cwd_from_steps`), latest task summary, unanswered `ask_question` multiple-choice options, and pending `run_command` / tool approval details (`pending_action`).
-   - Maps Ghostty TTYs to Ghostty's AppleScript `terminals` UUIDs (`macos_list_ghostty_terminals`, `match_ghostty_surfaces`) so Agent Deck can focus exact Ghostty tabs (`focus t`) and inject replies/choices (`input text` + `send key`) without stealing focus.
+2. **Antigravity (`agy`) & Claude Code (`claude`) Linking & Pending Action Extraction:**
+   - **Antigravity (`agy`):** Matches `agy` PIDs against `~/.gemini/antigravity-cli/presence/*.lock` to resolve `conversation_id`, queries `~/.gemini/antigravity-cli/conversation_summaries.db` (read-only SQLite URI) for renamed conversation titles and run/wait status, and reads `~/.gemini/antigravity-cli/brain/<conv_id>/.system_generated/logs/transcript.jsonl` to infer active worktree, latest task, `ask_question` choices, and unsandboxed command approvals.
+   - **Claude Code (`claude`):** Matches `claude` sessions against `~/.claude/projects/<sanitized-cwd>/<uuid>.jsonl` (`_find_claude_transcript_path`, `_read_claude_transcript`, `extract_claude_pending_action`) to resolve session title, active worktree, latest task, `AskUserQuestion` choices, and `Bash`/`Edit`/`Write` permission prompts.
+   - **Ghostty Native AppleScript Bridge:** Maps Ghostty TTYs to Ghostty's AppleScript `terminals` UUIDs (`macos_list_ghostty_terminals`, `match_ghostty_surfaces`, distinguishing `agy` `"<title> — <folder>"` and `claude` `"✳ <title>"` / braille spinner tab titles) so Agent Deck can focus exact Ghostty tabs (`focus t`) and inject replies/choices (`input text` + `send key`) without stealing focus.
 
 3. **Listening Port Mapping (`scan_listening_ports`, `attach_browser_metadata`):**
    - Runs `lsof -nP -iTCP -sTCP:LISTEN -Fpcfn` (cached 2.5s) to map listening TCP ports (`1024 <= port < 49152`) to owning PIDs while filtering desktop GUI apps, DB ports, and Agent Deck's own port.

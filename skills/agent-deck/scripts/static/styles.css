@@ -33,6 +33,9 @@
   --exited: #ad2824;
   --exited-soft: #fde8e7;
   --exited-border: #eba19e;
+  --claude: #b94816;
+  --claude-soft: #fdf0ea;
+  --claude-border: #efb69c;
 
   /* Accessible Light-Mode ANSI 16 palette */
   --ansi-0: #1f2937;
@@ -92,6 +95,9 @@
     --exited: #ff8984;
     --exited-soft: #331a1c;
     --exited-border: #6d3034;
+    --claude: #f69d72;
+    --claude-soft: #2e1d16;
+    --claude-border: #6b3c28;
 
     --ansi-0: #485366;
     --ansi-1: #ff7b72;
@@ -147,6 +153,9 @@
   --exited: #ff8984;
   --exited-soft: #331a1c;
   --exited-border: #6d3034;
+  --claude: #f69d72;
+  --claude-soft: #2e1d16;
+  --claude-border: #6b3c28;
 
   --ansi-0: #485366;
   --ansi-1: #ff7b72;
@@ -299,6 +308,78 @@ kbd {
   width: 20px;
   height: 20px;
   color: var(--accent);
+}
+
+/* Top Agent Selector Tabs (Both | agy | Claude) */
+.agent-tabs {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px;
+  border-radius: 9px;
+  background: var(--sunk);
+  border: 1px solid var(--line);
+  flex-shrink: 0;
+}
+.agent-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid transparent;
+  background: transparent;
+  padding: 4px 11px;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--muted);
+  cursor: pointer;
+  transition: background 150ms ease, color 150ms ease, border-color 150ms ease;
+}
+.agent-tab:hover {
+  color: var(--text);
+}
+.agent-tab.active {
+  background: var(--panel);
+  color: var(--text);
+  border-color: var(--line);
+  font-weight: 600;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+}
+.agent-tab.tab-agy.active {
+  color: var(--working);
+  border-color: var(--working-border);
+}
+.agent-tab.tab-claude.active {
+  color: var(--claude);
+  border-color: var(--claude-border);
+}
+.agent-mark {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  flex-shrink: 0;
+}
+.agent-mark.mark-agy {
+  background: var(--working);
+}
+.agent-mark.mark-claude {
+  background: var(--claude);
+}
+.agent-tab-count {
+  font-size: 11.5px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--elevated);
+  border: 1px solid var(--line);
+  color: var(--text);
+  line-height: 1.45;
+}
+.agent-tab.has-needs .agent-tab-count {
+  background: var(--needs-soft);
+  border-color: var(--needs-border);
+  color: var(--needs);
 }
 
 .counts {
@@ -637,6 +718,11 @@ body.is-resizing .sidebar-resizer::after {
   color: var(--working);
   background: var(--working-soft);
   border-color: var(--working-border);
+}
+.row-badge.kind-claude {
+  color: var(--claude);
+  background: var(--claude-soft);
+  border-color: var(--claude-border);
 }
 .row-badge.ext-badge {
   text-transform: none;
@@ -1457,6 +1543,11 @@ body.is-resizing .browser-frame {
   background: var(--working-soft);
   border-color: var(--working-border);
 }
+.agent-chip.is-claude {
+  color: var(--claude);
+  background: var(--claude-soft);
+  border-color: var(--claude-border);
+}
 .ticket-chip {
   color: var(--done);
   background: var(--done-soft);
@@ -1732,6 +1823,11 @@ body.is-resizing .browser-frame {
   background: var(--working-soft);
   border-color: var(--working-border);
 }
+.slash-btn.is-claude {
+  color: var(--claude);
+  background: var(--claude-soft);
+  border-color: var(--claude-border);
+}
 
 .adopt-banner {
   display: flex;
@@ -1908,7 +2004,7 @@ dialog::backdrop {
 
 .preset-tabs {
   display: grid;
-  grid-template-columns: repeat(2, 1fr);
+  grid-template-columns: repeat(3, 1fr);
   gap: 4px;
   background: var(--sunk);
   border: 1px solid var(--line);
