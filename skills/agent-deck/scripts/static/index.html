@@ -1,0 +1,415 @@
+<!doctype html>
+<html lang="en" data-theme="system">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Agent Deck</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:ital,wght@0,400;0,500;0,600;1,400&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <svg class="icon-brand" viewBox="0 0 24 24" aria-hidden="true">
+        <rect x="2.5" y="3.5" width="19" height="17" rx="3" fill="none" stroke="currentColor" stroke-width="1.75"/>
+        <path d="M6.5 9.25L9.75 12.5L6.5 15.75M11.5 15.75H16.5" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      <span>Agent Deck</span>
+    </div>
+
+    <div class="counts" id="counts" role="toolbar" aria-label="Filter sessions by status"></div>
+
+    <div class="top-actions">
+      <div class="seg" role="group" aria-label="Layout view">
+        <button class="seg-btn active" id="viewFocusBtn" type="button" title="Inspector view (v)">
+          <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><line x1="9" y1="4" x2="9" y2="20"/></svg>
+          Focus
+        </button>
+        <button class="seg-btn" id="viewGridBtn" type="button" title="Multi-session live wall (v)">
+          <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="8" height="7" rx="1.5"/><rect x="13" y="4" width="8" height="7" rx="1.5"/><rect x="3" y="13" width="8" height="7" rx="1.5"/><rect x="13" y="13" width="8" height="7" rx="1.5"/></svg>
+          Grid
+        </button>
+      </div>
+
+      <label class="check-ctl">
+        <input type="checkbox" id="showExternal" checked>
+        <span>External</span>
+      </label>
+
+      <label class="check-ctl">
+        <input type="checkbox" id="showShells">
+        <span>Plain shells</span>
+      </label>
+
+      <button class="btn icon-btn" id="soundBtn" type="button" aria-label="Toggle sound alerts" title="Toggle sound alerts"></button>
+      <button class="btn" id="notifyBtn" type="button">Enable alerts</button>
+      <button class="btn icon-btn" id="themeBtn" type="button" aria-label="Switch color theme" title="Switch theme (System / Light / Dark)"></button>
+      <button class="btn" id="topOpenTermBtn" type="button" title="Open macOS Terminal window">
+        <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+        Open terminal
+      </button>
+      <button class="btn primary" id="newBtn" type="button">
+        <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+        New session
+      </button>
+    </div>
+  </header>
+
+  <div class="banner" id="banner" role="alert" hidden></div>
+
+  <main class="workspace" id="workspace">
+    <aside class="sidebar" id="sidebar" aria-label="Session list">
+      <div class="sidebar-filter">
+        <svg class="ico search-ico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><line x1="20" y1="20" x2="16.2" y2="16.2"/></svg>
+        <input type="search" id="filterInput" placeholder="Filter by session, branch, note…" aria-label="Filter sessions">
+      </div>
+
+      <ol class="session-list" id="list" aria-label="Active tmux sessions"></ol>
+
+      <details class="activity-feed" open>
+        <summary>
+          <span>Recent transitions</span>
+          <span class="feed-count" id="eventCount">0</span>
+        </summary>
+        <ol id="events"></ol>
+      </details>
+
+      <div class="shortcut-bar" aria-label="Keyboard shortcuts">
+        <span><kbd>j</kbd><kbd>k</kbd> switch</span>
+        <span><kbd>1</kbd>–<kbd>9</kbd> jump</span>
+        <span><kbd>r</kbd> reload</span>
+        <span><kbd>b</kbd> term/web</span>
+        <span><kbd>v</kbd> grid</span>
+        <span><kbd>n</kbd> new</span>
+      </div>
+    </aside>
+
+    <div
+      class="sidebar-resizer"
+      id="sidebarResizer"
+      role="separator"
+      aria-orientation="vertical"
+      aria-label="Resize session list"
+      tabindex="0"
+      title="Drag to resize · Double-click to reset"
+    ></div>
+
+    <section class="inspector" id="detail">
+      <div class="empty-state" id="empty">
+        <h2>No agent sessions running yet</h2>
+        <p>Start an Antigravity (<code>agy</code>) or CLI agent session directly from here, or launch one in any terminal:</p>
+        <pre class="empty-code">tmux new -s feature-work
+agy --mode auto</pre>
+        <div class="empty-actions">
+          <button class="btn primary" id="emptyNewBtn" type="button">Start an agy session</button>
+          <button class="btn" id="emptyShowShellsBtn" type="button" hidden>Show open plain shells</button>
+        </div>
+      </div>
+
+      <div class="pane-view" id="pane" hidden>
+        <div class="browser-view" id="browserView">
+          <div class="browser-bar">
+            <div class="b-identity">
+              <span class="dot" id="bDot"></span>
+              <strong class="b-session-name" id="bName"></strong>
+              <span class="b-branch-chip" id="bBranch" hidden></span>
+            </div>
+
+            <div class="b-nav">
+              <button class="btn icon-btn" id="bReloadBtn" type="button" aria-label="Reload session browser" title="Reload browser view (r)">
+                <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+              </button>
+
+              <form class="b-url-form" id="bUrlForm" autocomplete="off">
+                <svg class="ico b-url-ico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><line x1="3.6" y1="9" x2="20.4" y2="9"/><line x1="3.6" y1="15" x2="20.4" y2="15"/><path d="M11.5 3a17 17 0 0 0 0 18"/><path d="M12.5 3a17 17 0 0 1 0 18"/></svg>
+                <input
+                  type="text"
+                  id="bUrlInput"
+                  placeholder="No server attached — enter :port or http://localhost:3000…"
+                  aria-label="Local browser URL for this session"
+                >
+                <button type="button" class="b-url-chip" id="bUrlResetBtn" hidden title="Revert to auto-detected dev server port">Auto</button>
+                <button type="submit" class="b-url-go" title="Navigate URL">Go</button>
+              </form>
+
+              <select class="b-port-select" id="bPortSelect" aria-label="Switch local port" title="Switch to a running local server port" hidden></select>
+            </div>
+
+            <div class="b-actions">
+              <button class="btn icon-btn" id="bMobileBtn" type="button" aria-label="Toggle mobile viewport width" title="Toggle mobile / desktop viewport">
+                <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="2" width="10" height="20" rx="2"/><line x1="12" y1="18" x2="12.01" y2="18"/></svg>
+              </button>
+              <button class="btn compact" id="bServerBtn" type="button" hidden></button>
+              <button class="btn icon-btn" id="bPopOutBtn" type="button" aria-label="Open in external browser tab" title="Open URL in new browser tab">
+                <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+              </button>
+              <button class="btn subtle compact" id="bOpenTermBtn" type="button" title="Jump to this session's terminal window">
+                <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+                Terminal
+              </button>
+              <div class="seg" role="group" aria-label="Right panel mode">
+                <button class="seg-btn active" type="button" data-right-tab="browser" title="Live local browser view (b)">Browser</button>
+                <button class="seg-btn" type="button" data-right-tab="terminal" title="Session terminal &amp; notes (b)">Logs</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="browser-stage" id="browserStage">
+            <div class="browser-frames" id="browserFrames"></div>
+
+            <div class="browser-empty" id="browserEmpty" hidden>
+              <div class="browser-empty-card">
+                <h2 id="bEmptyTitle">No local web server running for this session</h2>
+                <p class="browser-empty-meta" id="bEmptyMeta"></p>
+                <p class="browser-empty-task" id="bEmptyTask"></p>
+
+                <div class="browser-empty-actions">
+                  <button class="btn primary" id="bEmptyStartBtn" type="button" hidden>Start dev server</button>
+                  <button class="btn" id="bEmptyTermBtn" type="button">
+                    <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+                    Open terminal
+                  </button>
+                </div>
+
+                <div class="browser-port-picker" id="bEmptyPortsWrap" hidden>
+                  <div class="browser-port-label">Connect to a running local server</div>
+                  <div class="browser-port-list" id="bEmptyPorts"></div>
+                </div>
+
+                <form class="browser-custom-form" id="bEmptyUrlForm" autocomplete="off">
+                  <input
+                    type="text"
+                    id="bEmptyUrlInput"
+                    placeholder="Or enter any URL / port (e.g. :3001, http://localhost:8000/docs)…"
+                    aria-label="Custom URL or port"
+                  >
+                  <button class="btn" type="submit">Open here</button>
+                </form>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="term-view" id="termView" hidden>
+          <div class="pane-head">
+            <div class="pane-title-row">
+              <h1 id="pName"></h1>
+              <span class="status-pill" id="pStatus"></span>
+              <span class="source-chip" id="pSourceChip" hidden></span>
+              <span class="agent-chip" id="pAgentChip" hidden></span>
+              <span class="git-chip" id="pGitChip" hidden></span>
+              <span class="ticket-chip" id="pTicketChip" hidden></span>
+              <span class="spacer"></span>
+              <button class="btn subtle" id="openTermBtn" type="button" title="Open or focus this session in macOS Terminal / iTerm2">
+                <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+                Open terminal
+              </button>
+              <button class="btn primary compact-primary" id="adoptBtn" type="button" hidden>Resume in tmux</button>
+              <button class="btn subtle" id="ackBtn" type="button" hidden title="Mark turn reviewed">Mark reviewed</button>
+              <button class="btn subtle" id="pinBtn" type="button" title="Pin session to top">Pin</button>
+              <button class="btn subtle" id="copyAttach" type="button" title="Copy tmux attach command">Attach cmd</button>
+              <button class="btn subtle" id="respawnBtn" type="button" hidden>Restart pane</button>
+              <button class="btn subtle" id="dismissBtn" type="button" hidden title="Hide external session from list">Hide</button>
+              <button class="btn danger-outline" id="killBtn" type="button">Close</button>
+              <div class="seg" role="group" aria-label="Right panel mode">
+                <button class="seg-btn" type="button" data-right-tab="browser" title="Live local browser view (b)">Browser</button>
+                <button class="seg-btn active" type="button" data-right-tab="terminal" title="Session terminal &amp; notes (b)">Logs</button>
+              </div>
+            </div>
+
+          <div class="pane-task-line" id="pTaskLine"></div>
+
+          <input
+            class="note-input"
+            id="pLabel"
+            type="text"
+            maxlength="120"
+            placeholder="Add a working note (e.g. PR #142 — verify auth flow)…"
+            aria-label="Session note"
+          >
+
+          <div class="pane-meta" id="pMeta"></div>
+
+          <div class="pane-progress" id="pProg" hidden>
+            <div class="prog-track"><span id="pBar"></span></div>
+            <span class="prog-label" id="pProgText"></span>
+          </div>
+        </div>
+
+        <div class="term-toolbar">
+          <div class="term-search">
+            <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><line x1="20" y1="20" x2="16.2" y2="16.2"/></svg>
+            <input type="search" id="termSearch" placeholder="Find in terminal output…" aria-label="Find in terminal output">
+            <span class="term-match-count" id="termMatchCount"></span>
+          </div>
+          <div class="term-controls">
+            <label class="check-ctl compact">
+              <input type="checkbox" id="ansiToggle" checked>
+              <span>ANSI colors</span>
+            </label>
+            <label class="check-ctl compact">
+              <input type="checkbox" id="wrapToggle" checked>
+              <span>Wrap lines</span>
+            </label>
+            <button class="btn compact" id="copyOutBtn" type="button">Copy output</button>
+          </div>
+        </div>
+
+        <div class="term-wrap">
+          <pre class="term-out wrap" id="out" tabindex="0" aria-label="Terminal output"></pre>
+          <button class="btn jump-btn" id="jump" type="button">Jump to latest</button>
+        </div>
+
+        <div class="prompt-banner" id="promptBanner" hidden>
+          <div class="prompt-banner-text">
+            <span class="dot s-needs_input"></span>
+            <strong id="promptTitle">Waiting for your response</strong>
+          </div>
+          <div class="prompt-choices" id="promptChoices"></div>
+        </div>
+
+        <div class="quick-bar" id="quick">
+          <div class="quick-keys">
+            <span class="bar-label">Keys</span>
+            <button class="btn key-btn" type="button" data-keys='["Enter"]'>Enter</button>
+            <button class="btn key-btn" type="button" data-keys='["y","Enter"]'>y + Enter</button>
+            <button class="btn key-btn" type="button" data-keys='["n","Enter"]'>n + Enter</button>
+            <button class="btn key-btn" type="button" data-keys='["1"]'>1</button>
+            <button class="btn key-btn" type="button" data-keys='["2"]'>2</button>
+            <button class="btn key-btn" type="button" data-keys='["3"]'>3</button>
+            <button class="btn key-btn" type="button" data-keys='["Up"]' aria-label="Arrow Up">↑</button>
+            <button class="btn key-btn" type="button" data-keys='["Down"]' aria-label="Arrow Down">↓</button>
+            <button class="btn key-btn" type="button" data-keys='["Tab"]'>Tab</button>
+            <button class="btn key-btn" type="button" data-keys='["BTab"]'>Shift+Tab</button>
+            <button class="btn key-btn" type="button" data-keys='["Escape"]'>Esc</button>
+            <button class="btn key-btn danger-text" type="button" data-keys='["C-c"]'>Ctrl+C</button>
+          </div>
+
+          <div class="slash-bar" id="agySlashBar" hidden>
+            <span class="bar-label">agy</span>
+            <button class="btn slash-btn" type="button" data-slash="/plan">/plan</button>
+            <button class="btn slash-btn" type="button" data-slash="/compact">/compact</button>
+            <button class="btn slash-btn" type="button" data-slash="/goal">/goal</button>
+            <button class="btn slash-btn" type="button" data-slash="/boost">/boost</button>
+            <button class="btn slash-btn" type="button" data-slash="/grill-me">/grill-me</button>
+            <button class="btn slash-btn" type="button" data-slash="/learn">/learn</button>
+          </div>
+        </div>
+
+        <div class="adopt-banner" id="adoptBanner" hidden>
+          <span id="adoptBannerText">Live external view. Move into tmux to send prompts and keystrokes from Agent Deck.</span>
+          <div class="adopt-banner-actions">
+            <button class="btn subtle" id="adoptFocusBtn" type="button">Open terminal</button>
+            <button class="btn primary compact-primary" id="adoptBannerBtn" type="button">Resume in tmux</button>
+          </div>
+        </div>
+
+        <form class="composer" id="cmdForm" autocomplete="off">
+          <textarea
+            id="cmd"
+            rows="1"
+            placeholder="Send a prompt or command… (Enter to send, Shift+Enter for newline)"
+            aria-label="Prompt or command to send"
+          ></textarea>
+          <div class="composer-right">
+            <label class="check-ctl compact">
+              <input type="checkbox" id="withEnter" checked>
+              <span>Enter</span>
+            </label>
+            <button class="btn primary" type="submit">Send</button>
+          </div>
+        </form>
+        </div>
+      </div>
+    </section>
+
+    <section class="grid-wall" id="gridWall" hidden aria-label="Multi-session live grid"></section>
+  </main>
+
+  <dialog id="newDlg" aria-labelledby="newDlgTitle">
+    <form id="newForm" method="dialog">
+      <div class="dlg-head">
+        <h2 id="newDlgTitle">Start tmux session</h2>
+        <button class="btn icon-btn" type="button" id="nCloseX" aria-label="Close dialog">
+          <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/></svg>
+        </button>
+      </div>
+
+      <div class="preset-tabs" role="tablist" aria-label="Agent preset">
+        <button class="preset-tab active" type="button" data-preset="agy">Antigravity (agy)</button>
+        <button class="preset-tab" type="button" data-preset="custom">Custom / Shell</button>
+      </div>
+
+      <div class="form-row two-col">
+        <label class="field">
+          <span>Session name</span>
+          <input id="nName" class="mono" required pattern="[A-Za-z0-9_\-]{1,40}" placeholder="of-ticket-fix">
+        </label>
+        <label class="field">
+          <span>Note (optional)</span>
+          <input id="nLabel" maxlength="120" placeholder="Investigate support ticket">
+        </label>
+      </div>
+
+      <label class="field">
+        <span>Workspace folder</span>
+        <input id="nCwd" class="mono" placeholder="~/projects/my-app">
+      </label>
+      <div class="cwd-chips" id="cwdChips"></div>
+
+      <div class="agy-builder" id="agyBuilder">
+        <div class="form-row two-col">
+          <label class="field">
+            <span>Execution mode</span>
+            <select id="agyMode">
+              <option value="">Default</option>
+              <option value="auto">auto</option>
+              <option value="accept-edits">accept-edits</option>
+              <option value="plan">plan</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>Reasoning effort</span>
+            <select id="agyEffort">
+              <option value="">Default</option>
+              <option value="low">low</option>
+              <option value="medium">medium</option>
+              <option value="high">high</option>
+              <option value="xhigh">xhigh</option>
+              <option value="max">max</option>
+            </select>
+          </label>
+        </div>
+        <div class="builder-checks">
+          <label class="check-ctl"><input type="checkbox" id="agyContinue"> <span>Resume latest (<code>--continue</code>)</span></label>
+          <label class="check-ctl"><input type="checkbox" id="agySandbox"> <span>Sandbox (<code>--sandbox</code>)</span></label>
+        </div>
+      </div>
+
+      <label class="field">
+        <span>Launch command</span>
+        <input id="nCmd" class="mono" value="agy">
+      </label>
+
+      <label class="field">
+        <span>Initial prompt (optional — sent once agent starts)</span>
+        <input id="nPrompt" placeholder="Leave blank to drop at interactive prompt">
+      </label>
+
+      <p class="form-err" id="nErr" role="alert"></p>
+
+      <div class="dlg-foot">
+        <button class="btn" type="button" id="nCancel">Cancel</button>
+        <button class="btn primary" type="submit">Start session</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+  <script>window.__DECK_TOKEN__ = "__TOKEN__";</script>
+  <script src="/app.js"></script>
+</body>
+</html>
